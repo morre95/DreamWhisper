@@ -2,7 +2,7 @@
 use crate::db::Database;
 use anyhow::{bail, Context, Result};
 use reqwest::blocking::{Client, Response};
-use rusqlite::OptionalExtension;
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -159,14 +159,7 @@ impl Database {
         }
     }
     pub fn comfy_settings(&self) -> Result<ComfySettings> {
-        let value: Option<String> = self
-            .connect()?
-            .query_row("SELECT json FROM image_config WHERE id=1", [], |r| r.get(0))
-            .optional()?;
-        Ok(value
-            .map(|s| serde_json::from_str(&s))
-            .transpose()?
-            .unwrap_or_default())
+        read_config(&self.connect()?)
     }
     pub fn save_comfy_settings(&self, config: &ComfySettings) -> Result<()> {
         validate_url(&config.url)?;
@@ -174,8 +167,7 @@ impl Database {
             validate_workflow(&config.workflow)?;
             build_prompt(config, "test")?;
         }
-        self.connect()?.execute("INSERT INTO image_config VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET json=excluded.json", [serde_json::to_string(config)?])?;
-        Ok(())
+        write_config(&self.connect()?, config)
     }
     pub fn saved_workflows(&self) -> Result<Vec<SavedWorkflow>> {
         let c = self.connect()?;
@@ -201,48 +193,55 @@ impl Database {
             ..Default::default()
         };
         build_prompt(&config, "test")?;
+        let mut c = self.connect()?;
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         if workflow.id.is_empty() {
             workflow.id = uuid::Uuid::new_v4().to_string();
-        } else if !self.saved_workflows()?.iter().any(|w| w.id == workflow.id) {
+        } else if !workflow_exists(&tx, &workflow.id)? {
             bail!("Flödet finns inte längre.");
         }
-        self.connect()?.execute("INSERT INTO image_workflows VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET json=excluded.json", rusqlite::params![workflow.id,serde_json::to_string(&workflow)?])?;
-        self.select_workflow(&workflow.id)?;
+        tx.execute("INSERT INTO image_workflows VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET json=excluded.json", rusqlite::params![workflow.id,serde_json::to_string(&workflow)?])?;
+        select_workflow_in(&tx, &workflow.id)?;
+        tx.commit()?;
         Ok(workflow.id)
     }
     pub fn delete_workflow(&self, id: &str) -> Result<()> {
         let mut c = self.connect()?;
         let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        if tx.execute("DELETE FROM image_workflows WHERE id=?1", [id])? == 0 {
-            bail!("Flödet finns inte längre.");
-        }
-        let json: Option<String> = tx
-            .query_row("SELECT json FROM image_config WHERE id=1", [], |r| r.get(0))
-            .optional()?;
-        let mut config: ComfySettings = json
-            .map(|s| serde_json::from_str(&s))
-            .transpose()?
-            .unwrap_or_default();
+        let ids = tx
+            .prepare("SELECT id FROM image_workflows ORDER BY rowid")?
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let position = ids
+            .iter()
+            .position(|w| w == id)
+            .context("Flödet finns inte längre.")?;
+        tx.execute("DELETE FROM image_workflows WHERE id=?1", [id])?;
+        let config = read_config(&tx)?;
         if config.selected_workflow_id.as_deref() == Some(id) {
-            config.selected_workflow_id = None;
-            // Do not fall back to the old singleton workflow after removing it.
-            config.workflow = json!({});
-            config.workflow_name.clear();
-            config.node_id.clear();
-            config.input_name.clear();
-            config.negative_field = None;
-            tx.execute("INSERT INTO image_config VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET json=excluded.json", [serde_json::to_string(&config)?])?;
+            // Keep only the connection: the old singleton workflow must not be
+            // migrated back. The following flow, else the preceding one, takes over.
+            let next = ids
+                .get(position + 1)
+                .or_else(|| ids.get(position.checked_sub(1)?));
+            let config = ComfySettings {
+                url: config.url,
+                comfy_directory: config.comfy_directory,
+                comfy_python_path: config.comfy_python_path,
+                selected_workflow_id: next.cloned(),
+                ..Default::default()
+            };
+            write_config(&tx, &config)?;
         }
         tx.commit()?;
         Ok(())
     }
     pub fn select_workflow(&self, id: &str) -> Result<()> {
-        if !self.saved_workflows()?.iter().any(|w| w.id == id) {
-            bail!("Flödet saknas.");
-        }
-        let mut config = self.comfy_settings()?;
-        config.selected_workflow_id = Some(id.into());
-        self.save_comfy_settings(&config)
+        let mut c = self.connect()?;
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        select_workflow_in(&tx, id)?;
+        tx.commit()?;
+        Ok(())
     }
     pub fn save_comfy_connection(&self, connection: ComfyConnection) -> Result<()> {
         let mut config = self.comfy_settings()?;
@@ -275,7 +274,7 @@ impl Database {
             rusqlite::params![workflow.id, serde_json::to_string(&workflow)?],
         )?;
         config.selected_workflow_id = Some(workflow.id);
-        tx.execute("INSERT INTO image_config VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET json=excluded.json", [serde_json::to_string(&config)?])?;
+        write_config(&tx, &config)?;
         tx.commit()?;
         Ok(())
     }
@@ -681,6 +680,39 @@ pub fn step(db: &Database, root: &Path, mut job: ImageJob) -> Result<()> {
     }
     db.save_image_job(&job)
 }
+fn read_config(c: &Connection) -> Result<ComfySettings> {
+    let value: Option<String> = c
+        .query_row("SELECT json FROM image_config WHERE id=1", [], |r| r.get(0))
+        .optional()?;
+    Ok(value
+        .map(|s| serde_json::from_str(&s))
+        .transpose()?
+        .unwrap_or_default())
+}
+fn write_config(c: &Connection, config: &ComfySettings) -> Result<()> {
+    c.execute(
+        "INSERT INTO image_config VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET json=excluded.json",
+        [serde_json::to_string(config)?],
+    )?;
+    Ok(())
+}
+fn workflow_exists(c: &Connection, id: &str) -> Result<bool> {
+    Ok(c.query_row(
+        "SELECT 1 FROM image_workflows WHERE id=?1",
+        [id],
+        |_| Ok(()),
+    )
+    .optional()?
+    .is_some())
+}
+fn select_workflow_in(c: &Connection, id: &str) -> Result<()> {
+    if !workflow_exists(c, id)? {
+        bail!("Flödet saknas.");
+    }
+    let mut config = read_config(c)?;
+    config.selected_workflow_id = Some(id.into());
+    write_config(c, &config)
+}
 fn download_images(
     http: &Client,
     root: &Path,
@@ -869,6 +901,41 @@ mod tests {
         let job = db.next_image_job()?.unwrap();
         Ok((temp, db, job))
     }
+    fn generated(path: &Path) -> GeneratedImage {
+        GeneratedImage {
+            deleted: false,
+            created_at: None,
+            path: path.to_string_lossy().into(),
+            node_id: "9".into(),
+            filename: path.file_name().unwrap().to_string_lossy().into(),
+            subfolder: "".into(),
+            image_type: "output".into(),
+        }
+    }
+    #[test]
+    fn deleting_images_rejects_stored_paths_outside_the_job_directory() -> Result<()> {
+        let (temp, db, mut job) = fixture()?;
+        let directory = temp.path().join("images").join(&job.id);
+        std::fs::create_dir_all(&directory)?;
+        let outside = temp.path().join("outside.png");
+        std::fs::write(&outside, b"image")?;
+        let link = directory.join("link.png");
+        std::os::unix::fs::symlink(&outside, &link)?;
+        job.images.push(generated(&outside));
+        job.images.push(generated(&link));
+        db.save_image_job(&job)?;
+        let error = db
+            .delete_generated_image(temp.path(), &job.id, &job.images[0].path)
+            .unwrap_err();
+        assert_eq!(error.to_string(), "Ogiltig bildsökväg");
+        let error = db
+            .delete_generated_image(temp.path(), &job.id, &job.images[1].path)
+            .unwrap_err();
+        assert_eq!(error.to_string(), "Bilden ligger utanför bildarkivet");
+        assert!(outside.exists() && link.exists());
+        assert!(db.image_jobs()?[0].images.iter().all(|i| !i.deleted));
+        Ok(())
+    }
     #[test]
     fn deleted_images_stay_deleted_and_preserve_other_results() -> Result<()> {
         let (temp, db, mut job) = fixture()?;
@@ -877,15 +944,7 @@ mod tests {
         for name in ["first.png", "second.png"] {
             let path = directory.join(name);
             std::fs::write(&path, b"image")?;
-            job.images.push(GeneratedImage {
-                deleted: false,
-                created_at: None,
-                path: path.to_string_lossy().into(),
-                node_id: "9".into(),
-                filename: name.into(),
-                subfolder: "".into(),
-                image_type: "output".into(),
-            });
+            job.images.push(generated(&path));
         }
         db.save_image_job(&job)?;
         let first = job.images[0].path.clone();
@@ -1175,26 +1234,26 @@ for line in sys.stdin:
         Ok(())
     }
     #[test]
-    fn deleting_workflows_preserves_jobs_and_clears_only_the_deleted_selection() -> Result<()> {
+    fn deleting_the_selected_workflow_selects_the_next_and_preserves_jobs() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let db = Database::open(temp.path())?;
-        let config = config();
-        let first = db.save_workflow(SavedWorkflow {
-            id: String::new(),
-            name: "Första".into(),
-            workflow: config.workflow.clone(),
-            node_id: "6".into(),
-            input_name: "text".into(),
-            negative_field: None,
-        })?;
-        let second = db.save_workflow(SavedWorkflow {
-            id: String::new(),
-            name: "Andra".into(),
-            workflow: config.workflow,
-            node_id: "6".into(),
-            input_name: "text".into(),
-            negative_field: None,
-        })?;
+        let save = |name: &str| {
+            db.save_workflow(SavedWorkflow {
+                id: String::new(),
+                name: name.into(),
+                workflow: config().workflow,
+                node_id: "6".into(),
+                input_name: "text".into(),
+                negative_field: None,
+            })
+        };
+        let [first, second, third, fourth] = [
+            save("Första")?,
+            save("Andra")?,
+            save("Tredje")?,
+            save("Fjärde")?,
+        ];
+        let selected = |db: &Database| db.comfy_settings().map(|c| c.selected_workflow_id);
         db.enqueue_image_with_workflow(
             ImageDraft {
                 prompt: "sparat bildjobb".into(),
@@ -1203,35 +1262,34 @@ for line in sys.stdin:
             Some(&first),
         )?;
         db.delete_workflow(&first)?;
-        assert_eq!(
-            db.comfy_settings()?.selected_workflow_id.as_deref(),
-            Some(second.as_str())
-        );
+        assert_eq!(selected(&db)?, Some(fourth.clone()));
         assert_eq!(db.image_jobs()?[0].config.workflow_name, "Första");
         assert_eq!(
             db.image_jobs()?[0].config.workflow["6"]["inputs"]["text"],
             "sparat bildjobb"
         );
-        assert!(db
-            .enqueue_image_with_workflow(
-                ImageDraft {
-                    prompt: "ny bild".into(),
-                    ..Default::default()
-                },
-                Some(&first)
-            )
-            .is_err());
+        db.select_workflow(&second)?;
         db.delete_workflow(&second)?;
+        assert_eq!(selected(&db)?, Some(third.clone()));
+        db.enqueue_image(ImageDraft {
+            prompt: "nästa flöde".into(),
+            ..Default::default()
+        })?;
+        assert_eq!(db.image_jobs()?[0].config.workflow_name, "Tredje");
+        db.select_workflow(&fourth)?;
+        db.delete_workflow(&fourth)?;
+        assert_eq!(selected(&db)?, Some(third.clone()));
+        db.delete_workflow(&third)?;
         let reopened = Database::open(temp.path())?;
         assert!(reopened.saved_workflows()?.is_empty());
-        assert!(reopened.comfy_settings()?.selected_workflow_id.is_none());
+        assert_eq!(selected(&reopened)?, None);
         assert!(reopened
             .enqueue_image(ImageDraft {
                 prompt: "ny bild".into(),
                 ..Default::default()
             })
             .is_err());
-        assert_eq!(reopened.image_jobs()?.len(), 1);
+        assert_eq!(reopened.image_jobs()?.len(), 2);
         assert!(reopened.delete_workflow(&first).is_err());
         assert_eq!(reopened.comfy_settings()?.url, "http://127.0.0.1:8188");
         Ok(())

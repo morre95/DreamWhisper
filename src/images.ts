@@ -153,12 +153,13 @@ export class ImagesView {
       ${job.release_pending && ['completed', 'failed', 'uncertain'].includes(job.status) ? '<p class="muted">Väntar på ledig ComfyUI-kö och frigör GPU-minnet innan Whisper återstartas.</p>' : ''}
       ${job.error ? `<p class="inline-error">${esc(job.error)}</p>` : ''}
       <details><summary>Bildprompt och workflow</summary><p class="image-prompt-preview">${esc(job.draft.prompt)}</p>${job.draft.negative_prompt != null ? `<b>Negativ prompt</b><p class="image-prompt-preview">${esc(job.draft.negative_prompt) || '(tom)'}</p>` : ''}<small>${esc(job.config.workflow_name)}</small></details>
-
+      ${job.images.some(image => !image.deleted) ? `<div class="image-gallery">${job.images.filter(image => !image.deleted).map(image => this.thumbnail(image, job)).join('')}</div>` : ''}
       <div class="device-actions"><button class="secondary small" data-reuse-image="${esc(job.id)}">Använd prompt igen</button>${job.draft.recording_id ? `<button class="secondary small" data-image-source="${esc(job.id)}">Öppna inspelningen</button>` : ''}${job.prompt_id && ['failed', 'uncertain'].includes(job.status) && !job.release_pending ? `<button class="secondary small" data-follow-image="${esc(job.id)}">Följ upp / hämta igen</button>` : ''}${job.release_pending && job.error ? `<button class="secondary small" data-dismiss-image="${esc(job.id)}">Avsluta uppföljning</button>` : ''}</div>
       </article>`).join('') : '<div class="settings-card"><p class="muted">Här visas bildjobben och dina sparade bilder.</p></div>';
     // Preserve focus and image loading when the poll contains no changes.
     if (target.dataset.rendered === html) return;
     target.dataset.rendered = html; target.innerHTML = html;
+    this.bindPreviews(target);
     target.querySelectorAll<HTMLButtonElement>('[data-reuse-image]').forEach(button => button.onclick = () => {
       const job = jobs.find(j => j.id === button.dataset.reuseImage)!;
       if ((this.draft.prompt.trim() || this.draft.negative_prompt?.trim()) && !window.confirm('Ersätta bildutkastet med denna prompt?')) return;
@@ -192,19 +193,13 @@ export class ImagesView {
     const entries = galleryImages(this.snapshot?.jobs ?? []).slice(0, limit);
     const esc = this.esc;
     const html = entries.length ? `<div class="image-gallery">${entries.map(({ job, image }, index) => `<article class="settings-card gallery-card">
-      <button class="image-thumbnail" data-preview="${index}" aria-label="Visa bilden större"><img src="${esc(convertFileSrc(image.path))}" loading="lazy" alt="${esc(job.draft.prompt)}" /></button>
+      ${this.thumbnail(image, job)}
       <p><b>${esc(job.config.workflow_name)}</b><br><small>${esc(new Date(image.created_at ?? job.created_at).toLocaleString('sv-SE'))}</small></p>
       <details><summary>Bildprompt</summary><p class="image-prompt-preview">${esc(job.draft.prompt)}</p>${job.draft.negative_prompt != null ? `<b>Negativ prompt</b><p class="image-prompt-preview">${esc(job.draft.negative_prompt)}</p>` : ''}</details>
       <button class="secondary small" data-delete="${index}">Ta bort bild</button></article>`).join('')}</div>` : '<p class="muted">Inga sparade bilder ännu.</p>';
     if (target.dataset.rendered === html) return;
     target.dataset.rendered = html; target.innerHTML = html;
-    target.querySelectorAll<HTMLButtonElement>('[data-preview]').forEach(button => button.onclick = () => {
-      const { image } = entries[Number(button.dataset.preview)];
-      const dialog = document.createElement('dialog'); dialog.className = 'image-preview-dialog';
-      dialog.innerHTML = `<button class="secondary">Stäng</button><img src="${esc(convertFileSrc(image.path))}" alt="Skapad bild" />`;
-      dialog.querySelector('button')!.onclick = () => dialog.close(); dialog.onclose = () => dialog.remove();
-      document.body.append(dialog); dialog.showModal();
-    });
+    this.bindPreviews(target);
     target.querySelectorAll<HTMLButtonElement>('[data-delete]').forEach(button => button.onclick = () => void (async () => {
       if (!window.confirm('Ta bort bilden från ditt lokala bildarkiv? Bildfilen raderas. Originalet i ComfyUI påverkas inte.')) return;
       const { job, image } = entries[Number(button.dataset.delete)];
@@ -212,6 +207,17 @@ export class ImagesView {
       try { await invoke('delete_generated_image', { id: job.id, path: image.path }); await this.refresh(); this.notify('Bilden har tagits bort.'); }
       catch (e) { this.notify(String(e), true); button.disabled = false; }
     })());
+  }
+  private thumbnail(image: GeneratedImage, job: ImageJob) {
+    return `<button class="image-thumbnail" data-preview-path="${this.esc(image.path)}" aria-label="Visa bilden större"><img src="${this.esc(convertFileSrc(image.path))}" loading="lazy" alt="${this.esc(job.draft.prompt)}" /></button>`;
+  }
+  private bindPreviews(target: HTMLElement) {
+    target.querySelectorAll<HTMLButtonElement>('[data-preview-path]').forEach(button => button.onclick = () => {
+      const dialog = document.createElement('dialog'); dialog.className = 'image-preview-dialog';
+      dialog.innerHTML = `<button class="secondary">Stäng</button><img src="${this.esc(convertFileSrc(button.dataset.previewPath!))}" alt="Skapad bild" />`;
+      dialog.querySelector('button')!.onclick = () => dialog.close(); dialog.onclose = () => dialog.remove();
+      document.body.append(dialog); dialog.showModal();
+    });
   }
   private renderWorkflows() {
     const target = this.container.querySelector<HTMLElement>('#workflow-library'); if (!target) return;
@@ -306,7 +312,7 @@ export class ImagesView {
     target.innerHTML = `<h3>Sparade bildflöden</h3><p>Ta bort flöden du inte längre vill använda. Bildhistorik, köade jobb och sparade bilder behålls.</p>${workflows.length ? workflows.map(w => `<div class="workflow-settings-row"><div><b>${this.esc(w.name)}</b>${w.id === selected ? '<small>Valt för nästa bild</small>' : ''}</div><button type="button" class="secondary small" data-delete-workflow="${this.esc(w.id)}">Ta bort</button></div>`).join('') : '<p class="muted">Inga sparade flöden. Lägg till ett flöde under Bilder.</p>'}`;
     target.querySelectorAll<HTMLButtonElement>('[data-delete-workflow]').forEach(button => button.onclick = () => void (async () => {
       const workflow = workflows.find(w => w.id === button.dataset.deleteWorkflow)!;
-      if (!window.confirm(`Ta bort flödet ”${workflow.name}”? Tidigare bilder och bildjobb finns kvar.${workflow.id === selected ? ' Välj ett annat flöde under Bilder innan du skapar nästa bild.' : ''}`)) return;
+      if (!window.confirm(`Ta bort flödet ”${workflow.name}”? Tidigare bilder och bildjobb finns kvar.${workflow.id === selected ? ' Nästa sparade flöde väljs i stället.' : ''}`)) return;
       button.disabled = true;
       try { await invoke('delete_workflow', { id: workflow.id }); await this.refresh(); this.notify('Flödet har tagits bort.'); }
       catch (e) { this.notify(String(e), true); button.disabled = false; }
