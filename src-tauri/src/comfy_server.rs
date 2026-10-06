@@ -48,6 +48,89 @@ impl ComfyServer {
         config: &ComfySettings,
         root: &Path,
     ) -> Result<ServerStatus> {
+        let weak = Arc::downgrade(manager);
+        let config = config.clone();
+        let root = root.to_path_buf();
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        // Linux PDEATHSIG watches the creating *thread*. Tauri blocking-pool
+        // threads can retire while the app is alive, so a dedicated thread must
+        // create the process and stay alive until it has exited and been reaped.
+        std::thread::Builder::new()
+            .name("comfy-process-owner".into())
+            .spawn(move || {
+                let launched = match weak.upgrade() {
+                    Some(manager) => Self::start_process(&manager, &config, &root),
+                    None => {
+                        let _ = tx.send(Err(anyhow::anyhow!("Appen har avslutats")));
+                        return;
+                    }
+                };
+                let pid = match launched {
+                    Ok((status, pid)) => {
+                        let _ = tx.send(Ok(status));
+                        pid
+                    }
+                    Err(error) => {
+                        let _ = tx.send(Err(error));
+                        return;
+                    }
+                };
+                // Reusing an existing server does not create another process owner.
+                let Some(pid) = pid else {
+                    return;
+                };
+                let started = Instant::now();
+                loop {
+                    let Some(manager) = weak.upgrade() else {
+                        return;
+                    };
+                    let running = {
+                        let mut server = manager.lock().unwrap();
+                        if server.child.as_ref().map(Child::id) != Some(pid) {
+                            return;
+                        }
+                        server.snapshot();
+                        if server.child.is_none() {
+                            return;
+                        }
+                        server.status.status == "running"
+                    };
+                    if !running {
+                        let ready = test_connection(&config.url).is_ok();
+                        let mut server = manager.lock().unwrap();
+                        if server.child.as_ref().map(Child::id) != Some(pid) {
+                            return;
+                        }
+                        server.snapshot();
+                        if server.child.is_none() {
+                            return;
+                        }
+                        if ready {
+                            server.status.status = "running".into();
+                            server.status.error = None;
+                        } else if started.elapsed() > Duration::from_secs(120) {
+                            server.shutdown();
+                            server.status.status = "failed".into();
+                            server.status.error = Some(format!(
+                                "ComfyUI svarade inte inom två minuter. Se {}",
+                                server.status.log_path
+                            ));
+                            return;
+                        }
+                    }
+                    drop(manager);
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            })
+            .context("ComfyUI:s processtråd kunde inte startas")?;
+        rx.recv()
+            .context("ComfyUI:s processtråd avslutades före start")?
+    }
+    fn start_process(
+        manager: &Arc<Mutex<Self>>,
+        config: &ComfySettings,
+        root: &Path,
+    ) -> Result<(ServerStatus, Option<u32>)> {
         validate_url(&config.url)?;
         let url = reqwest::Url::parse(config.url.trim())?;
         let host = match url.host_str().unwrap_or("127.0.0.1") {
@@ -65,7 +148,7 @@ impl ComfyServer {
                     server.status.url
                 );
             }
-            return Ok(server.status.clone());
+            return Ok((server.status.clone(), None));
         }
         if test_connection(&config.url).is_ok() {
             server.status = ServerStatus {
@@ -73,7 +156,7 @@ impl ComfyServer {
                 url: config.url.clone(),
                 ..Default::default()
             };
-            return Ok(server.status.clone());
+            return Ok((server.status.clone(), None));
         }
         if TcpStream::connect_timeout(
             &SocketAddr::new(host.parse::<IpAddr>()?, port),
@@ -136,48 +219,7 @@ impl ComfyServer {
             url: config.url.clone(),
             log_path: log_path.to_string_lossy().into(),
         };
-        let initial = server.status.clone();
-        drop(server);
-        let weak = Arc::downgrade(manager);
-        let address = config.url.clone();
-        std::thread::spawn(move || {
-            let started = Instant::now();
-            loop {
-                let Some(manager) = weak.upgrade() else {
-                    return;
-                };
-                {
-                    let mut server = manager.lock().unwrap();
-                    server.snapshot();
-                    if server.child.is_none() {
-                        return;
-                    }
-                }
-                let ready = test_connection(&address).is_ok();
-                let mut server = manager.lock().unwrap();
-                if server.child.is_none() {
-                    return;
-                }
-                if ready {
-                    server.status.status = "running".into();
-                    server.status.error = None;
-                    return;
-                }
-                if started.elapsed() > Duration::from_secs(120) {
-                    server.shutdown();
-                    server.status.status = "failed".into();
-                    server.status.error = Some(format!(
-                        "ComfyUI svarade inte inom två minuter. Se {}",
-                        server.status.log_path
-                    ));
-                    return;
-                }
-                drop(server);
-                drop(manager);
-                std::thread::sleep(Duration::from_secs(1));
-            }
-        });
-        Ok(initial)
+        Ok((server.status.clone(), server.child.as_ref().map(Child::id)))
     }
 }
 impl Drop for ComfyServer {
@@ -231,10 +273,16 @@ HTTPServer((args.listen,args.port),Handler).serve_forever()
             ..Default::default()
         };
         let owned = Arc::new(Mutex::new(ComfyServer::default()));
-        assert_eq!(
-            ComfyServer::start(&owned, &config, temp.path())?.status,
-            "starting"
-        );
+        // Match a Tauri blocking task: the caller thread may retire after start returns.
+        let caller_manager = owned.clone();
+        let caller_config = config.clone();
+        let caller_root = temp.path().to_path_buf();
+        let initial = std::thread::spawn(move || {
+            ComfyServer::start(&caller_manager, &caller_config, &caller_root)
+        })
+        .join()
+        .expect("launcher panicked")?;
+        assert_eq!(initial.status, "starting");
         wait(&owned, "running")?;
         let pid = owned.lock().unwrap().child.as_ref().unwrap().id();
         assert_eq!(

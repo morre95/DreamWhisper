@@ -243,7 +243,7 @@ export class ImagesView {
     try {
       const server = await invoke<{ status: string; error: string | null; url: string; log_path: string }>('comfy_server_status');
       text.textContent = server.error ?? ({ starting: 'ComfyUI startar …', running: `ComfyUI kör på ${server.url}`, external: `En befintlig ComfyUI-server kör på ${server.url}`, stopped: 'Servern har avslutats.' } as Record<string, string>)[server.status] ?? 'Servern är inte startad av DreamWhisper.';
-      if (server.log_path) text.textContent += ` Logg: ${server.log_path}`;
+      if (server.log_path && !text.textContent.includes(server.log_path)) text.textContent += ` Logg: ${server.log_path}`;
       container!.querySelector<HTMLButtonElement>('#comfy-start')!.disabled = this.serverStarting || ['starting', 'running'].includes(server.status);
     } catch (e) { text.textContent = String(e); }
   }
