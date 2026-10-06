@@ -11,6 +11,30 @@ fn err(e: impl std::fmt::Display) -> String {
 }
 
 #[tauri::command]
+fn image_snapshot(state: State<'_, AppState>) -> ApiResult<crate::images::ImageSnapshot> {
+    state.db.image_snapshot().map_err(err)
+}
+#[tauri::command]
+fn save_comfy_settings(state: State<'_, AppState>, settings: crate::images::ComfySettings) -> ApiResult<()> {
+    state.db.save_comfy_settings(&settings).map_err(err)
+}
+#[tauri::command]
+fn save_image_draft(state: State<'_, AppState>, draft: crate::images::ImageDraft) -> ApiResult<()> {
+    state.db.save_image_draft(&draft).map_err(err)
+}
+#[tauri::command]
+fn create_image(state: State<'_, AppState>, draft: crate::images::ImageDraft) -> ApiResult<String> {
+    state.db.enqueue_image(draft).map_err(err)
+}
+#[tauri::command]
+fn follow_image_job(state: State<'_, AppState>, id: String) -> ApiResult<()> {
+    state.db.retry_image_download(&id).map_err(err)
+}
+#[tauri::command]
+async fn test_comfy_connection(url: String) -> ApiResult<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::images::test_connection(&url).map_err(err)).await.map_err(err)?
+}
+#[tauri::command]
 fn snapshot(state: State<'_, AppState>) -> ApiResult<Snapshot> {
     state.snapshot().map_err(err)
 }
@@ -74,6 +98,10 @@ fn save_settings(
     state.db.save_settings(&settings).map_err(err)
 }
 #[tauri::command]
+fn control_queue(state: State<'_, AppState>, enabled: bool) -> ApiResult<()> {
+    state.control_queue(enabled).map_err(err)
+}
+#[tauri::command]
 fn retry_recording(state: State<'_, AppState>, id: String) -> ApiResult<()> {
     state.db.retry(&id).map_err(err)
 }
@@ -125,6 +153,7 @@ pub fn run() {
             let service = Service::open(root.clone())?;
             app.asset_protocol_scope()
                 .allow_directory(root.join("archive"), true)?;
+            app.asset_protocol_scope().allow_directory(root.join("images"), true)?;
             let development = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../worker/worker.py");
             let script = if cfg!(debug_assertions) && development.is_file() {
                 development
@@ -174,6 +203,12 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            image_snapshot,
+            save_comfy_settings,
+            save_image_draft,
+            create_image,
+            follow_image_job,
+            test_comfy_connection,
             snapshot,
             import_folder,
             import_device,
@@ -181,6 +216,7 @@ pub fn run() {
             unregister_device,
             save_settings,
             retry_recording,
+            control_queue,
             transcript,
             transcription_runs,
             save_segment,

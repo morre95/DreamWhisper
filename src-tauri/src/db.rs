@@ -25,7 +25,7 @@ impl Database {
         };
         let c = db.connect()?;
         let version: u32 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 1 {
+        if version > 2 {
             bail!("Databasen tillhör en nyare version av DreamWhisper");
         }
         c.execute_batch("PRAGMA journal_mode=WAL;
@@ -57,7 +57,10 @@ impl Database {
         );
         CREATE INDEX IF NOT EXISTS queue_status ON jobs(status);
         CREATE INDEX IF NOT EXISTS runs_recording ON transcription_runs(recording_id);
-        PRAGMA user_version=1;")?;
+        CREATE TABLE IF NOT EXISTS image_config (id INTEGER PRIMARY KEY CHECK(id=1), json TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS image_draft (id INTEGER PRIMARY KEY CHECK(id=1), json TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS image_jobs (id TEXT PRIMARY KEY, json TEXT NOT NULL);
+        PRAGMA user_version=2;")?;
         c.execute("UPDATE jobs SET status='queued', error='Återställd efter avbruten körning', started_at=NULL WHERE status='running'", [])?;
         Ok(db)
     }
@@ -191,6 +194,14 @@ impl Database {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(recordings)
+    }
+    pub fn queue(&self) -> Result<Vec<String>> {
+        let c = self.connect()?;
+        let mut q = c.prepare("SELECT r.id FROM jobs j JOIN recordings r ON r.id=j.recording_id WHERE j.status IN ('queued','running') AND r.available=1 ORDER BY CASE WHEN j.status='running' THEN 0 ELSE 1 END,r.imported_at,j.rowid")?;
+        let rows = q
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
     pub fn claim(&self) -> Result<Option<Job>> {
         let mut c = self.connect()?;
@@ -358,6 +369,28 @@ mod tests {
         import_file(&db, &root, &audio, None)?;
         let id = db.recordings()?[0].id.clone();
         Ok((temp, db, id))
+    }
+    #[test]
+    fn visible_queue_matches_claim_order_and_retry_preserves_pause() -> Result<()> {
+        let (temp, db, first) = fixture()?;
+        let root = temp.path().join("data");
+        let audio = temp.path().join("b.wav");
+        std::fs::write(&audio, b"different audio")?;
+        import_file(&db, &root, &audio, None)?;
+        let queue = db.queue()?;
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue[0], first);
+        let job = db.claim()?.unwrap();
+        assert_eq!(job.recording_id, queue[0]);
+        assert_eq!(db.queue()?, queue);
+        db.failed(&job.id, "test error")?;
+        assert_eq!(db.queue()?, vec![queue[1].clone()]);
+        db.retry(&first)?;
+        db.retry(&first)?;
+        assert_eq!(db.queue()?, queue);
+        assert!(!db.settings(&root)?.transcription_enabled);
+        assert_eq!(db.claim()?.unwrap().recording_id, first);
+        Ok(())
     }
     #[test]
     fn crashed_job_requeues_and_successful_result_is_atomic() -> Result<()> {

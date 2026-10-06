@@ -80,6 +80,8 @@ Vid start återställs pågående jobb till kön. Manifest återför färdigkopi
 
 Biblioteket söker i filnamn och den senaste transkriptversionens text. Klicka på en tidsstämpel för att lyssna. Spara rättningar innan du lämnar inspelningen. Varje ny transkribering får en ny version; tidigare maskintext och rättningar finns kvar och kan väljas i versionsmenyn. Export använder den valda versionen och dess rättningar. Ordtidsstämplar avser maskintexten och justeras inte automatiskt när du redigerar. Visat datum är källfilens ändringstid och ska inte ses som ett säkert inspelningsdatum.
 
+Ljudspelaren läser arkivfilen via Tauri:s begränsade asset-protokoll och spelar en lokal blob-URL, för att kringgå problem med direkt `asset://`-uppspelning i WebKitGTK på Linux. CSP tillåter denna lokala läsning och blob-uppspelning. Den komprimerade ljudfilen hålls i minnet medan den är vald; blob-URL:en frigörs när inspelning eller vy byts. Datorn behöver GStreamer med MP3/WAV-avkodning. Ljudinläsningen visar separata fel för saknad fil, nekad åtkomst och avkodningsproblem.
+
 Säkerhetskopiera hela appdatamappen när appen är avslutad. Modellen och Pythonmiljön kan återskapas separat.
 
 ## Testa och bygga
@@ -127,3 +129,5 @@ För att kontrollera GPU-kärnorna med syntetiskt ljud:
 Verifierat på denna dator: desktopbygge, TypeScriptbygge, Clippy, 13 automatiska tester, UDisks2-anrop och import → SQLite-kö → lokal KB-Whisper large CUDA FP16 → resultatlagring med en tyst 3-sekunders WAV på RTX 3090 (24 GB). Tyst ljud gav korrekt noll textsegment med VAD. Ett separat test med ett explicit ljudfönster verifierade också GPU-inferens och ordtidsstämpling i FP16; det testet mäter inte taligenkänningens kvalitet. Modellrevision: `d5d5984b4d8f7c4847a8ea203f1976285fb28300`.
 
 Återstår för validering: fysisk Sony-anslutning, dess volymidentifierare, svenska talinspelningar, ordtidsstämplarnas kvalitet och visuell kontroll av native-gränssnittet. Ingen diktafon eller automatiserbar GUI-session fanns tillgänglig under implementationen. Nästa förbättringar är grafisk mappväljare, valbar arkivplats och exaktare inspelningsdatum från Sony-filnamn.
+
+Arbetskö visar pågående och väntande inspelningar i behandlingsordning samt misslyckade jobb med felorsak. Välj **Starta kön** för att aktivera transkribering; **Pausa kön** stoppar efter pågående inspelning. Försök igen köar om filen och bevarar tidigare transkript, men aktiverar inte en pausad kö. Vid fel när modellen laddas kan du korrigera inställningarna och välja **Starta om motorn**.

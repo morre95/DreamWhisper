@@ -117,6 +117,9 @@ pub struct ImportReport {
 
 #[derive(Debug, Serialize)]
 pub struct Snapshot {
+    pub queue: Vec<String>,
+    pub worker_status: String,
+    pub worker_error: Option<String>,
     pub recordings: Vec<Recording>,
     pub devices: Vec<Device>,
     pub settings: Settings,

@@ -1,4 +1,5 @@
 import { invoke, convertFileSrc, isTauri } from '@tauri-apps/api/core';
+import { ArchiveAudio } from './audio';
 import type { Device, ImportReport, Recording, Run, Settings, Snapshot, Transcript } from './types';
 import './style.css';
 
@@ -14,7 +15,8 @@ let state: Snapshot | null = null;
 let selected: string | null = null;
 let activeRun: string | null = null;
 let loaded: Transcript | null = null;
-let page: 'library' | 'devices' | 'settings' = 'library';
+let audioSource: ArchiveAudio | null = null;
+let page: 'library' | 'queue' | 'devices' | 'settings' = 'library';
 let filter = '';
 let loadSequence = 0;
 let dirty = false;
@@ -33,6 +35,7 @@ app.innerHTML = `
     <div class="nav-label">DITT ARKIV</div>
     <nav aria-label="Huvudmeny">
       <button data-page="library" class="nav active">${icons.library}Inspelningar<span id="count">0</span></button>
+      <button data-page="queue" class="nav">${icons.wave}Arbetskö<span id="queue-count">0</span></button>
       <button data-page="devices" class="nav">${icons.device}Diktafon</button>
       <button data-page="settings" class="nav">${icons.settings}Inställningar</button>
     </nav>
@@ -47,7 +50,7 @@ app.innerHTML = `
       <div class="workspace"><section class="recording-panel"><div class="list-head"><h2>Bibliotek</h2><span id="list-count">0 filer</span></div><label class="search-label"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="Sök namn eller transkript…" aria-label="Sök inspelningar" /></label><div id="recording-list"></div></section>
       <section class="detail-panel" id="detail"><div class="detail-empty"><span class="empty-icon">${icons.wave}</span><h2>En tanke börjar med din röst</h2><p>Anslut din Sony-diktafon eller importera en mapp med inspelningar. Välj sedan en fil för att lyssna och läsa.</p><span class="format-note">MP3 & WAV · SVENSK TRANSKRIBERING</span></div></section></div>
     </section>
-    <section id="devices-page" class="hidden"></section><section id="settings-page" class="hidden"></section>
+    <section id="queue-page" class="hidden"></section><section id="devices-page" class="hidden"></section><section id="settings-page" class="hidden"></section>
     <footer><span id="activity">Redo</span><span id="archive-location"></span></footer>
   </main>
   <dialog id="import-dialog"><form id="import-form"><div class="eyebrow">LOKAL IMPORT</div><h2>Importera inspelningar</h2><p>Ange mappen med ljudfiler. Undermappar tas med och originalen bevaras.</p><label>Mappens fullständiga sökväg<input id="import-path" required placeholder="/run/media/ditt-namn/IC RECORDER/PRIVATE/SONY/REC_FILE" /></label><div class="dialog-actions"><button type="button" id="import-cancel" class="secondary">Avbryt</button><button type="submit" class="primary">Importera mapp</button></div></form></dialog>
@@ -75,8 +78,9 @@ async function refresh() {
     $('#stat-all').textContent = String(state.recordings.length);
     $('#stat-done').textContent = String(state.recordings.filter(r => r.status === 'completed').length);
     $('#stat-queue').textContent = String(state.recordings.filter(r => ['queued', 'running'].includes(r.status)).length);
+    $('#queue-count').textContent = String(state.queue.length);
     $('#activity').textContent = state.activity;
-    $('#engine-status').textContent = state.settings.transcription_enabled ? 'Transkribering aktiverad' : 'Transkribering pausad';
+    $('#engine-status').textContent = queueStatus();
     $('#archive-location').textContent = state.data_dir;
     $('#archive-location').title = state.data_dir;
     const notice = $('#notice');
@@ -88,6 +92,7 @@ async function refresh() {
       const newStatus = state.recordings.find(r => r.id === selected)?.status;
       if (selected && oldStatus !== newStatus && !dirty) await loadDetail(selected);
     }
+    if (page === 'queue') renderQueue();
     if (page === 'devices') renderDevices();
   } catch (error) { $('#activity').textContent = String(error); }
   finally { refreshing = false; }
@@ -119,28 +124,46 @@ async function loadDetail(id: string, runId?: string) {
   renderDetail(recording, transcript, runs);
 }
 function renderDetail(recording: Recording, transcript: Transcript, runs: Run[]) {
+  audioSource?.dispose();
+  audioSource = null;
   $('#detail').innerHTML = `
     <div class="detail-head"><div class="eyebrow">INSPELNING</div><h2>${esc(recording.name)}</h2><div class="detail-meta">${esc(date(recording.source_modified_at))}<span>·</span>${(recording.size / 1024 / 1024).toFixed(1)} MB<span>·</span><span class="status ${esc(recording.status)}">${esc(labels[recording.status])}</span></div></div>
-    <div class="player"><span class="player-label">ORIGINALLJUD</span><audio id="audio" controls preload="metadata" src="${esc(convertFileSrc(recording.archive_path))}"></audio><div id="audio-error" class="hidden inline-error">Ljudet kunde inte spelas. Kontrollera att arkivfilen finns och att ljudformatet stöds.</div></div>
+    <div class="player"><span class="player-label">ORIGINALLJUD</span><audio id="audio" controls preload="metadata"></audio><div id="audio-error" class="hidden inline-error"></div></div>
     ${recording.error ? `<p class="inline-error">${esc(recording.error)}</p>` : ''}
-    <div class="transcript-tools"><h3>Transkript <span>SV</span></h3><div class="tool-actions"><button id="retry" class="text-button" ${recording.status === 'running' ? 'disabled' : ''}>${transcript.run_id ? 'Ny transkribering' : 'Försök igen'}</button>${transcript.run_id ? '<select id="export-format" aria-label="Exportformat"><option value="txt">TXT</option><option value="md">Markdown</option><option value="srt">SRT</option></select><button id="export" class="secondary small">Exportera ↗</button>' : ''}</div></div>
+    <div class="transcript-tools"><h3>Transkript <span>SV</span></h3><div class="tool-actions"><button id="retry" class="text-button" ${['running', 'queued'].includes(recording.status) ? 'disabled' : ''}>${recording.status === 'queued' ? 'Redan i kön' : recording.status === 'running' ? 'Transkriberar' : transcript.run_id ? 'Ny transkribering' : 'Försök igen'}</button>${transcript.run_id ? '<select id="export-format" aria-label="Exportformat"><option value="txt">TXT</option><option value="md">Markdown</option><option value="srt">SRT</option></select><button id="export" class="secondary small">Exportera ↗</button>' : ''}</div></div>
     ${runs.length > 1 ? `<label class="version-label">Version<select id="version">${runs.map((run, i) => `<option value="${esc(run.id)}" ${run.id === transcript.run_id ? 'selected' : ''}>${esc(date(run.created_at))}${i === 0 ? ' · senaste' : ''}</option>`).join('')}</select></label>` : ''}
-    <div class="transcript-content">${transcript.run_id ? (transcript.segments.length ? transcript.segments.map(s => `<article class="segment" data-start="${s.start}" data-end="${s.end}"><button class="timestamp" data-seek="${s.start}" title="Spela från denna tid">${clock(s.start)}</button><textarea data-segment="${s.id}" aria-label="Text vid ${clock(s.start)}" rows="2">${esc(s.edited_text ?? s.text)}</textarea></article>`).join('') : '<p class="transcript-empty">Inget tal hittades i inspelningen.</p>') : `<div class="transcript-empty"><p>${recording.status === 'running' ? 'Din inspelning transkriberas …' : recording.status === 'failed' ? 'Transkriberingen misslyckades. Åtgärda felet och försök igen.' : 'Inspelningen ligger i arbetskön.'}</p><small>${state?.settings.transcription_enabled ? 'Texten visas när transkriberingen är klar.' : 'Aktivera transkribering under Inställningar när modellen är installerad.'}</small></div>`}</div>
+    <div class="transcript-content">${transcript.run_id ? (transcript.segments.length ? transcript.segments.map(s => `<article class="segment" data-start="${s.start}" data-end="${s.end}"><button class="timestamp" data-seek="${s.start}" title="Spela från denna tid">${clock(s.start)}</button><textarea data-segment="${s.id}" aria-label="Text vid ${clock(s.start)}" rows="2">${esc(s.edited_text ?? s.text)}</textarea></article>`).join('') : '<p class="transcript-empty">Inget tal hittades i inspelningen.</p>') : `<div class="transcript-empty"><p>${recording.status === 'running' ? 'Din inspelning transkriberas …' : recording.status === 'failed' ? 'Transkriberingen misslyckades. Åtgärda felet och försök igen.' : 'Inspelningen ligger i arbetskön.'}</p><small>${state?.settings.transcription_enabled ? 'Texten visas när transkriberingen är klar.' : 'Kön är pausad. Öppna Arbetskö och välj Starta kön.'}</small></div>`}</div>
     ${transcript.run_id ? '<div class="save-bar"><span id="edit-status">Tidsstämplarna följer originalljudet.</span><button id="save-edits" class="primary small" disabled>Spara rättningar</button></div>' : ''}`;
-  $('#audio').addEventListener('error', () => $('#audio-error').classList.remove('hidden'));
-  $('#audio').addEventListener('timeupdate', () => {
-    const time = $<HTMLAudioElement>('#audio').currentTime;
+  const audio = $<HTMLAudioElement>('#audio');
+  const audioError = $('#audio-error');
+  const showAudioError = (message: string) => { audioError.textContent = message; audioError.classList.remove('hidden'); };
+  audio.addEventListener('error', () => {
+    const messages: Record<number, string> = {
+      1: 'Ljudinläsningen avbröts.',
+      2: 'Ljudfilen kunde inte läsas.',
+      3: 'Ljudfilen kunde inte avkodas. Filen kan vara skadad.',
+      4: 'Ljudformatet stöds inte av datorns ljudspelare.',
+    };
+    showAudioError(messages[audio.error?.code ?? 0] ?? 'Ljudet kunde inte spelas.');
+  });
+  const source = new ArchiveAudio(audio, convertFileSrc(recording.archive_path), recording.archive_path.toLowerCase().endsWith('.mp3') ? 'audio/mpeg' : 'audio/wav');
+  audioSource = source;
+  void source.ready.catch(error => {
+    if (audioSource === source) showAudioError(`Ljudet kunde inte laddas: ${String(error)}`);
+  });
+  audio.addEventListener('timeupdate', () => {
+    if (audioSource !== source) return;
+    const time = audio.currentTime;
     document.querySelectorAll<HTMLElement>('.segment').forEach(el => el.classList.toggle('playing', time >= Number(el.dataset.start) && time < Number(el.dataset.end)));
   });
   document.querySelectorAll<HTMLButtonElement>('[data-seek]').forEach(button => button.onclick = () => {
-    const audio = $<HTMLAudioElement>('#audio'); audio.currentTime = Number(button.dataset.seek);
-    void action(() => audio.play());
+    void action(() => source.playFrom(Number(button.dataset.seek)));
   });
   document.querySelectorAll<HTMLTextAreaElement>('[data-segment]').forEach(input => {
     input.oninput = () => { dirty = true; $<HTMLButtonElement>('#save-edits').disabled = false; $('#edit-status').textContent = 'Osparade rättningar'; };
     input.style.height = `${Math.max(input.scrollHeight, 58)}px`;
   });
-  $('#retry').onclick = () => void action(async () => { await invoke('retry_recording', { id: recording.id }); toast('Inspelningen har lagts i kön. Tidigare transkript finns kvar.'); await refresh(); });
+  $('#retry').onclick = () => void action(async () => { await invoke('retry_recording', { id: recording.id }); toast(`Inspelningen har lagts i kön.${transcript.run_id ? ' Tidigare transkript finns kvar.' : ''}${state?.settings.transcription_enabled ? '' : ' Kön är pausad – välj Starta kön.'}`); await refresh(); navigate('queue'); });
   document.querySelector<HTMLSelectElement>('#version')?.addEventListener('change', event => {
     if (dirty && !window.confirm('Du har osparade rättningar. Byta version?')) { (event.target as HTMLSelectElement).value = activeRun!; return; }
     void action(() => loadDetail(recording.id, (event.target as HTMLSelectElement).value));
@@ -165,6 +188,38 @@ async function saveEdits() {
     dirty = false; $('#edit-status').textContent = 'Rättningar sparade · originalljud och maskintext bevarade';
     toast('Rättningar sparade');
   } catch (error) { button.disabled = false; throw error; }
+}
+function queueStatus() {
+  if (!state) return 'Hämtar köstatus …';
+  if (!state.settings.transcription_enabled) return state.worker_status === 'running' ? 'Pausar efter pågående inspelning' : 'Transkribering pausad';
+  return ({ loading: 'Laddar modellen …', running: 'Transkriberar', error: 'Transkriberingsmotorn behöver åtgärdas', ready: 'Redo för transkribering' } as Record<string, string>)[state.worker_status] ?? 'Startar transkribering …';
+}
+function renderQueue() {
+  if (!state) return;
+  const snapshot = state;
+  const pending = snapshot.queue.map(id => snapshot.recordings.find(r => r.id === id)).filter((r): r is Recording => !!r);
+  const failed = snapshot.recordings.filter(r => r.status === 'failed');
+  let position = 0;
+  const row = (r: Recording, retry = false) => `<article class="queue-row"><span class="queue-position">${retry ? '!' : r.status === 'running' ? '▶' : ++position}</span><div class="queue-info"><b>${esc(r.name)}</b><small>${esc(labels[r.status])} · ${r.attempts} försök</small>${r.error ? `<p class="inline-error">${esc(r.error)}</p>` : ''}</div><button class="secondary small" data-open-queue="${esc(r.id)}">Öppna</button>${retry ? `<button class="secondary small" data-queue-retry="${esc(r.id)}">Försök igen</button>` : ''}</article>`;
+  $('#queue-page').innerHTML = `<div class="page-heading"><div><div class="eyebrow">FRÅN LJUD TILL TEXT</div><h1>Arbetskö</h1><p>${pending.length} pågående eller väntande · ${failed.length} misslyckade</p></div><div class="tool-actions"><button id="queue-control" class="primary">${snapshot.settings.transcription_enabled && snapshot.worker_status !== 'error' ? 'Pausa kön' : snapshot.worker_status === 'error' ? 'Starta om motorn' : 'Starta kön'}</button><button id="queue-settings" class="secondary">Inställningar</button></div></div>
+    <div class="settings-card queue-summary" role="status"><h2>${esc(queueStatus())}</h2><p>${!snapshot.settings.transcription_enabled ? 'Väntande filer är sparade. Starta kön för att transkribera dem. En pågående inspelning slutförs innan kön pausas.' : 'Filer transkriberas en i taget i ordningen nedan. Kön sparas även när appen stängs.'}</p>${snapshot.worker_error ? `<p class="inline-error">${esc(snapshot.worker_error)}</p><p>Kontrollera Python och modellmappen under Inställningar och starta sedan om motorn.</p>` : ''}${snapshot.worker_status === 'loading' || snapshot.worker_status === 'running' ? `<p>${esc(snapshot.activity)}</p>` : ''}</div>
+    <div class="settings-card queue-list"><h2>Pågående och väntande</h2>${pending.length ? pending.map(r => row(r)).join('') : '<p class="muted">Inga inspelningar väntar. Importera ljud eller välj Ny transkribering i biblioteket.</p>'}</div>
+    ${failed.length ? `<div class="settings-card queue-list"><h2>Misslyckade</h2>${failed.map(r => row(r, true)).join('')}</div>` : ''}`;
+  $('#queue-control').onclick = () => void action(async () => {
+    const enabled = !snapshot.settings.transcription_enabled || snapshot.worker_status === 'error';
+    $<HTMLButtonElement>('#queue-control').disabled = true;
+    try { await invoke('control_queue', { enabled }); await refresh(); }
+    finally { if (page === 'queue') renderQueue(); }
+  });
+  $('#queue-settings').onclick = () => navigate('settings');
+  document.querySelectorAll<HTMLButtonElement>('[data-open-queue]').forEach(b => b.onclick = () => {
+    selected = b.dataset.openQueue!; navigate('library');
+  });
+  document.querySelectorAll<HTMLButtonElement>('[data-queue-retry]').forEach(b => b.onclick = () => void action(async () => {
+    await invoke('retry_recording', { id: b.dataset.queueRetry });
+    toast(snapshot.settings.transcription_enabled ? 'Inspelningen har lagts i kön.' : 'Inspelningen har lagts i kön. Välj Starta kön för att fortsätta.');
+    await refresh();
+  }));
 }
 function renderDevices() {
   if (!state) return;
@@ -193,12 +248,13 @@ function renderSettings() {
 }
 function navigate(next: typeof page) {
   if (dirty && !window.confirm('Du har osparade rättningar. Lämna dem?')) return;
-  if (page === 'library' && next !== page) { const audio = document.querySelector<HTMLAudioElement>('#audio'); audio?.pause(); dirty = false; }
+  if (page === 'library' && next !== page) { audioSource?.dispose(); audioSource = null; dirty = false; }
   page = next;
-  for (const name of ['library', 'devices', 'settings']) $(`#${name}-page`).classList.toggle('hidden', name !== page);
+  for (const name of ['library', 'queue', 'devices', 'settings']) $(`#${name}-page`).classList.toggle('hidden', name !== page);
   document.querySelectorAll<HTMLElement>('[data-page]').forEach(b => b.classList.toggle('active', b.dataset.page === page));
-  $('#page-label').textContent = { library: 'Inspelningar', devices: 'Diktafon', settings: 'Inställningar' }[page];
+  $('#page-label').textContent = { library: 'Inspelningar', queue: 'Arbetskö', devices: 'Diktafon', settings: 'Inställningar' }[page];
   if (page === 'devices') renderDevices();
+  if (page === 'queue') renderQueue();
   if (page === 'settings') renderSettings();
   if (page === 'library' && selected) void action(() => loadDetail(selected!));
 }
@@ -222,6 +278,7 @@ $('#search').oninput = () => {
   });
 };
 window.addEventListener('beforeunload', event => { if (dirty) { event.preventDefault(); } });
+window.addEventListener('pagehide', () => audioSource?.dispose());
 if (isTauri()) { void refresh(); setInterval(() => void refresh(), 2000); }
 else {
   const notice = $('#notice'); notice.classList.remove('hidden'); notice.textContent = 'Webbförhandsvisning. Starta desktopappen med npm run desktop för enhetsupptäckt, import och transkribering.';

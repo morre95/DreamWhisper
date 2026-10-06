@@ -22,6 +22,7 @@ export interface Transcript {
 export interface Run { id: string; created_at: string; metadata: Record<string, unknown> }
 export interface ImportReport { imported: number; skipped: number; errors: string[] }
 export interface Snapshot {
+  queue: string[]; worker_status: string; worker_error: string | null;
   recordings: Recording[]; devices: Device[]; settings: Settings; data_dir: string;
   activity: string; device_error: string | null; last_import: ImportReport | null;
 }

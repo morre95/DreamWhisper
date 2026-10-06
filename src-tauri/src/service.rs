@@ -6,7 +6,7 @@ use std::{
     fs::{File, OpenOptions},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -14,6 +14,8 @@ use std::{
 
 #[derive(Default)]
 struct Runtime {
+    worker_status: String,
+    worker_error: Option<String>,
     devices: Vec<Device>,
     device_error: Option<String>,
     activity: String,
@@ -25,6 +27,7 @@ pub struct Service {
     runtime: Mutex<Runtime>,
     importing: Mutex<()>,
     pub stop: AtomicBool,
+    worker_revision: AtomicU64,
     _lock: File,
 }
 impl Service {
@@ -53,15 +56,36 @@ impl Service {
             }),
             importing: Mutex::new(()),
             stop: AtomicBool::new(false),
+            worker_revision: AtomicU64::new(0),
             _lock: lock,
         }))
     }
     pub fn activity(&self, msg: impl Into<String>) {
         self.runtime.lock().unwrap().activity = msg.into();
     }
+    fn worker_state(&self, status: &str, error: Option<String>) {
+        let mut runtime = self.runtime.lock().unwrap();
+        runtime.worker_status = status.into();
+        runtime.worker_error = error;
+    }
+    pub fn control_queue(&self, enabled: bool) -> Result<()> {
+        let mut settings = self.db.settings(&self.root)?;
+        if enabled && !Path::new(&settings.model_path).join("model.bin").is_file() {
+            anyhow::bail!("Modellmappen saknar model.bin. Kontrollera Inställningar.");
+        }
+        settings.transcription_enabled = enabled;
+        self.db.save_settings(&settings)?;
+        if enabled {
+            self.worker_revision.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(())
+    }
     pub fn snapshot(&self) -> Result<Snapshot> {
         let runtime = self.runtime.lock().unwrap();
         Ok(Snapshot {
+            queue: self.db.queue()?,
+            worker_status: runtime.worker_status.clone(),
+            worker_error: runtime.worker_error.clone(),
             recordings: self.db.recordings()?,
             devices: runtime.devices.clone(),
             settings: self.db.settings(&self.root)?,
@@ -222,16 +246,34 @@ impl Service {
             let mut worker: Option<Worker> = None;
             let mut configuration = String::new();
             let mut startup_failed = false;
+            let mut revision = 0;
             while !service.stop.load(Ordering::Relaxed) {
                 let result = (|| -> Result<()> {
+                    if let Some(job) = service.db.next_image_job()? {
+                        // This supervisor also owns Whisper: dropping it here is an
+                        // acknowledged GPU handoff, never concurrent generation.
+                        worker = None;
+                        service.worker_state("awaiting_images", None);
+                        service.activity("Transkribering väntar medan ComfyUI använder GPU:n");
+                        if let Err(e) = crate::images::step(&service.db, &service.root, job.clone()) {
+                            let mut current = service.db.image_jobs()?.into_iter().find(|j| j.id == job.id).unwrap_or(job);
+                            current.error = Some(format!("Anslutningen till ComfyUI avbröts: {e:#}. Försöker följa upp igen; inget nytt jobb skickas."));
+                            service.db.save_image_job(&current)?;
+                        }
+                        std::thread::sleep(Duration::from_secs(2));
+                        return Ok(());
+                    }
                     let settings = service.db.settings(&service.root)?;
                     let config = serde_json::to_string(&settings)?;
-                    if config != configuration {
+                    let next_revision = service.worker_revision.load(Ordering::Relaxed);
+                    if config != configuration || revision != next_revision {
+                        revision = next_revision;
                         worker = None;
                         startup_failed = false;
                         configuration = config;
                     }
                     if !settings.transcription_enabled {
+                        service.worker_state("paused", None);
                         std::thread::sleep(Duration::from_millis(500));
                         return Ok(());
                     }
@@ -240,23 +282,34 @@ impl Service {
                         return Ok(());
                     }
                     if worker.is_none() {
+                        service.worker_state("loading", None);
                         service.activity("Laddar KB-Whisper på GPU …");
                         match Worker::spawn(&settings, &script, &service.root, &service.stop) {
                             Ok(w) => {
                                 worker = Some(w);
+                                service.worker_state("ready", None);
                                 service.activity("Redo för transkribering");
                             }
                             Err(e) => {
                                 startup_failed = true;
-                                service.activity(format!("Worker: {e:#}. Stäng av och slå på transkribering efter att felet åtgärdats."));
+                                service.worker_state("error", Some(format!("{e:#}")));
+                                service.activity(format!("Worker: {e:#}. Åtgärda felet och välj Starta om motorn under Arbetskö."));
                                 return Ok(());
                             }
                         }
                     }
+                    // Pause may have been requested while the model was loading.
+                    if !service.db.settings(&service.root)?.transcription_enabled {
+                        service.worker_state("paused", None);
+                        return Ok(());
+                    }
+                    if service.db.next_image_job()?.is_some() { return Ok(()); }
                     let Some(job) = service.db.claim()? else {
+                        service.worker_state("ready", None);
                         std::thread::sleep(Duration::from_millis(500));
                         return Ok(());
                     };
+                    service.worker_state("running", None);
                     let result = worker
                         .as_mut()
                         .unwrap()
@@ -281,9 +334,11 @@ impl Service {
                             service.activity(format!("Transkribering misslyckades: {e:#}"));
                         }
                     }
+                    service.worker_state("ready", None);
                     Ok(())
                 })();
                 if let Err(e) = result {
+                    service.worker_state("error", Some(format!("{e:#}")));
                     service.activity(format!("Köfel: {e:#}"));
                     std::thread::sleep(Duration::from_secs(2));
                 }
@@ -364,6 +419,32 @@ mod tests {
         );
         assert_eq!(export_text(&t, "txt")?, "Rättat\n");
         assert!(export_text(&t, "../../unsafe").is_err());
+        Ok(())
+    }
+    #[test]
+    fn queue_controls_validate_model_and_preserve_other_settings() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let service = Service::open(temp.path().join("data"))?;
+        let mut settings = service.db.settings(&service.root)?;
+        settings.model_path = temp.path().join("model").to_string_lossy().into();
+        settings.auto_import = false;
+        settings.batch_size = 4;
+        settings.transcription_enabled = false;
+        service.db.save_settings(&settings)?;
+        assert!(service.control_queue(true).is_err());
+        assert!(!service.db.settings(&service.root)?.transcription_enabled);
+        std::fs::create_dir_all(&settings.model_path)?;
+        std::fs::write(Path::new(&settings.model_path).join("model.bin"), b"test")?;
+        service.control_queue(true)?;
+        let updated = service.db.settings(&service.root)?;
+        assert!(updated.transcription_enabled);
+        assert!(!updated.auto_import);
+        assert_eq!(updated.batch_size, 4);
+        let revision = service.worker_revision.load(Ordering::Relaxed);
+        service.control_queue(true)?;
+        assert!(service.worker_revision.load(Ordering::Relaxed) > revision);
+        service.control_queue(false)?;
+        assert!(!service.db.settings(&service.root)?.transcription_enabled);
         Ok(())
     }
     #[test]
