@@ -1,0 +1,39 @@
+[package]
+name = "dreamwhisper"
+version = "0.1.0"
+description = "Lokalt ljudarkiv och svensk transkribering"
+edition = "2021"
+
+[lib]
+name = "dreamwhisper_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "dreamwhisper"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[features]
+default = ["desktop"]
+desktop = ["dep:tauri", "dep:tauri-build"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = { version = "2", optional = true }
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+fs2 = "0.4"
+libc = "0.2"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tauri = { version = "2", optional = true, features = ["protocol-asset", "tray-icon"] }
+uuid = { version = "1", features = ["v4"] }
+walkdir = "2"
+zbus = { version = "5", features = ["blocking-api"] }
+
+[dev-dependencies]
+tempfile = "3"
