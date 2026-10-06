@@ -1,4 +1,5 @@
 import { invoke, convertFileSrc, isTauri } from '@tauri-apps/api/core';
+import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { JournalView } from './journal';
 import { ArchiveAudio } from './audio';
 import { ImagesView, selectedText } from './images';
@@ -52,6 +53,7 @@ app.innerHTML = `
     <div id="notice" class="notice hidden" role="status"></div>
     <section id="journal-page"></section><section id="library-page" class="hidden">
       <div class="page-heading"><div><div class="eyebrow">FRÅN RÖST TILL TEXT</div><h1>Dina inspelningar</h1><p>Fånga tanken. Hitta orden igen.</p></div><button id="import-open" class="primary">${icons.plus}Importera ljud</button></div>
+      <div id="audio-drop-zone" class="audio-drop-zone" role="status"><strong>Dra och släpp ljudfiler här</strong><span>WAV eller MP3 · Originalen bevaras · Läggs i transkriberingskön</span><small id="audio-drop-status">Om kön är pausad, välj Starta kön under Arbetskö.</small></div>
       <div class="overview"><div><span>ARKIVERADE</span><strong id="stat-all">0</strong><small>inspelningar</small></div><div><span>TRANSKRIBERADE</span><strong id="stat-done">0</strong><small>redo att läsa</small></div><div><span>I ARBETSKÖN</span><strong id="stat-queue">0</strong><small>väntar på transkribering</small></div><div class="engine"><span class="engine-dot"></span><div><b>KB-Whisper large</b><small>SVENSKA / ENGLISH · FP16 · CUDA</small><p id="engine-status">Transkribering pausad</p></div></div></div>
       <div class="workspace"><section class="recording-panel"><div class="list-head"><h2>Bibliotek</h2><span id="list-count">0 filer</span></div><label class="search-label"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="Sök namn eller transkript…" aria-label="Sök inspelningar" /></label><div id="recording-list"></div></section>
       <section class="detail-panel" id="detail"><div class="detail-empty"><span class="empty-icon">${icons.wave}</span><h2>En tanke börjar med din röst</h2><p>Anslut din Sony-diktafon eller importera en mapp med inspelningar. Välj sedan en fil för att lyssna och läsa.</p><span class="format-note">MP3 & WAV · SVENSK TRANSKRIBERING</span></div></section></div>
@@ -311,6 +313,7 @@ async function navigate(next: typeof page) {
   if (page === 'library' && next !== page) selectionEvents?.abort();
   imagesView.hideGallery();
   page = next;
+  $('#audio-drop-zone').classList.remove('drag-active');
   for (const name of ['journal', 'library', 'queue', 'images', 'gallery', 'devices', 'settings']) $(`#${name}-page`).classList.toggle('hidden', name !== page);
   document.querySelectorAll<HTMLElement>('[data-page]').forEach(b => b.classList.toggle('active', b.dataset.page === page));
   $('#page-label').textContent = { journal: 'Journal', library: 'Inspelningar', queue: 'Arbetskö', images: 'Bilder', gallery: 'Galleri', devices: 'Diktafon', settings: 'Inställningar' }[page];
@@ -347,5 +350,35 @@ if (isTauri()) { void refresh(); setInterval(() => void refresh(), 2000); }
 else {
   const notice = $('#notice'); notice.classList.remove('hidden'); notice.textContent = 'Webbförhandsvisning. Starta desktopappen med npm run desktop för enhetsupptäckt, import och transkribering.';
 }
+
+if (isTauri()) void action(async () => {
+  const zone = $('#audio-drop-zone');
+  const status = $('#audio-drop-status');
+  const unlisten = await getCurrentWebview().onDragDropEvent(event => {
+    const drop = event.payload;
+    if (drop.type === 'leave' || drop.type === 'drop') zone.classList.remove('drag-active');
+    if (page !== 'library' || $<HTMLDialogElement>('#import-dialog').open) return;
+    if (drop.type === 'enter' || drop.type === 'over') {
+      if (!busy) zone.classList.add('drag-active');
+    } else if (drop.type === 'drop' && drop.paths.length) {
+      if (busy) { toast('En import pågår. Vänta och släpp filerna igen.', true); return; }
+      busy = true;
+      zone.classList.add('importing');
+      status.textContent = 'Kopierar och verifierar ljudfiler …';
+      void action(async () => {
+        try {
+          const report = await invoke<ImportReport>('import_audio_files', { paths: drop.paths });
+          importMessage(report);
+          await refresh();
+        } finally {
+          busy = false;
+          zone.classList.remove('importing');
+          status.textContent = 'Om kön är pausad, välj Starta kön under Arbetskö.';
+        }
+      });
+    }
+  });
+  window.addEventListener('pagehide', unlisten, { once: true });
+});
 
 void action(() => journalView.show());

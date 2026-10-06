@@ -132,6 +132,16 @@ async fn import_folder(state: State<'_, AppState>, path: String) -> ApiResult<Im
     .map_err(err)?
 }
 #[tauri::command]
+async fn import_audio_files(
+    state: State<'_, AppState>,
+    paths: Vec<PathBuf>,
+) -> ApiResult<ImportReport> {
+    let service = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || service.import_files(&paths))
+        .await
+        .map_err(err)
+}
+#[tauri::command]
 async fn import_device(state: State<'_, AppState>, id: String) -> ApiResult<ImportReport> {
     let service = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || service.import_device(&id).map_err(err))
@@ -414,6 +424,7 @@ pub fn run() {
             test_comfy_connection,
             snapshot,
             import_folder,
+            import_audio_files,
             import_device,
             register_device,
             unregister_device,

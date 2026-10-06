@@ -114,6 +114,16 @@ impl Service {
         });
         Ok(report)
     }
+    pub fn import_files(&self, paths: &[PathBuf]) -> ImportReport {
+        let _guard = self.importing.lock().unwrap();
+        let report = archive::import_files(&self.db, &self.root, paths);
+        self.runtime.lock().unwrap().last_import = Some(ImportReport {
+            imported: report.imported,
+            skipped: report.skipped,
+            errors: report.errors.clone(),
+        });
+        report
+    }
     pub fn register(&self, id: &str) -> Result<()> {
         let d = devices::scan()?
             .into_iter()

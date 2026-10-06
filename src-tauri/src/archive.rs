@@ -164,6 +164,26 @@ pub fn import_file(
     result
 }
 
+/// Import explicitly dropped files without traversing folders or following links.
+pub fn import_files(db: &Database, root: &Path, paths: &[std::path::PathBuf]) -> ImportReport {
+    let mut report = ImportReport::default();
+    for path in paths {
+        let result = (|| -> Result<bool> {
+            let metadata = fs::symlink_metadata(path).context("Ljudfilen går inte att öppna")?;
+            if !metadata.file_type().is_file() {
+                bail!("Släpp enskilda WAV- eller MP3-filer, inte mappar eller länkar");
+            }
+            import_file(db, root, path, None)
+        })();
+        match result {
+            Ok(true) => report.imported += 1,
+            Ok(false) => report.skipped += 1,
+            Err(error) => report.errors.push(format!("{}: {error:#}", path.display())),
+        }
+    }
+    report
+}
+
 pub fn reconcile(db: &Database, root: &Path) -> Result<Vec<String>> {
     let archive = root.join("archive");
     fs::create_dir_all(&archive)?;
@@ -204,6 +224,43 @@ pub fn reconcile(db: &Database, root: &Path) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dropped_files_queue_valid_audio_and_report_duplicates_and_invalid_paths() -> Result<()> {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("data");
+        let db = Database::open(&root)?;
+        let wav = temp.path().join("dream.WAV");
+        let mp3 = temp.path().join("meditation.mp3");
+        let text = temp.path().join("notes.txt");
+        let link = temp.path().join("linked.wav");
+        fs::write(&wav, b"wav fixture")?;
+        fs::write(&mp3, b"mp3 fixture")?;
+        fs::write(&text, b"not audio")?;
+        symlink(&wav, &link)?;
+        let report = import_files(
+            &db,
+            &root,
+            &[
+                wav.clone(),
+                text,
+                temp.path().to_owned(),
+                link,
+                mp3,
+                wav.clone(),
+                temp.path().join("missing.wav"),
+            ],
+        );
+        assert_eq!(report.imported, 2);
+        assert_eq!(report.skipped, 1);
+        assert_eq!(report.errors.len(), 4);
+        let recordings = db.recordings()?;
+        assert_eq!(recordings.len(), 2);
+        assert!(recordings.iter().all(|r| r.status == "queued"));
+        assert_eq!(fs::read(wav)?, b"wav fixture");
+        assert!(!db.settings(&root)?.transcription_enabled);
+        Ok(())
+    }
     #[test]
     fn import_is_verified_idempotent_and_original_is_untouched() -> Result<()> {
         let temp = tempfile::tempdir()?;

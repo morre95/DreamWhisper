@@ -100,6 +100,8 @@ Upptäckten använder UDisks2 `GetManagedObjects`, USB-/modellinformation, serie
 
 En omonterad diktafon monteras via UDisks2 med `ro`. Befintliga monteringar återanvänds. Om systemets behörigheter stoppar monteringen kan du montera diktafonen i filhanteraren. Appen ändrar eller raderar aldrig inspelningar på diktafonen.
 
+I **Inspelningar** kan du dra och släppa flera WAV- eller MP3-filer från filhanteraren. Filerna kopieras, verifieras och läggs i transkriberingskön; originalen bevaras och dubbletter hoppas över. Mappar, länkar och andra filtyper rapporteras som fel utan att hindra övriga filer. Om transkriberingen är pausad väljer du **Starta kön** under Arbetskö.
+
 **Importera ljud** i biblioteket tar en fullständig mappsökväg och fungerar även utan diktafon. Endast vanliga WAV/MP3-filer importeras; symboliska länkar följs inte. För närvarande finns ingen grafisk mappväljare.
 
 ## Arkiv, återhämtning och redigering
@@ -188,7 +190,7 @@ För att kontrollera GPU-kärnorna med syntetiskt ljud:
 - `src-tauri/src/desktop.rs`: Tauri-kommandon, lokalt ljudprotokoll och systemfält.
 - `worker/`: modellhämtning och offline-transkribering.
 
-Verifierat på denna dator: desktopbygge, TypeScriptbygge, Clippy och 69 automatiska tester (46 Rust, 6 Python och 17 TypeScript/JavaScript). Native-gränssnittet har startats och granskats i ett isolerat testarkiv. Den lokala Qwen3-8B-modellen och CUDA-runtime är installerade och verifierade på RTX 3090 (24 GB). Svenska och engelska syntetiska beskrivningar gav två separata scener på cirka 7–9 sekunder, med engelska promptar och granskningsmaterial på respektive språk. Ett verkligt GPU-test kombinerade scenerna i en föreslagen vänster/höger-komposition och behöll källdetaljerna. Dessa tester verifierar körningen, inte bildkvaliteten.
+Verifierat på denna dator: desktopbygge, TypeScriptbygge, Clippy och 70 automatiska tester (47 Rust, 6 Python och 17 TypeScript/JavaScript). Native-gränssnittet har startats och granskats i ett isolerat testarkiv. Den lokala Qwen3-8B-modellen och CUDA-runtime är installerade och verifierade på RTX 3090 (24 GB). Svenska och engelska syntetiska beskrivningar gav två separata scener på cirka 7–9 sekunder, med engelska promptar och granskningsmaterial på respektive språk. Ett verkligt GPU-test kombinerade scenerna i en föreslagen vänster/höger-komposition och behöll källdetaljerna. Dessa tester verifierar körningen, inte bildkvaliteten.
 
 Tidigare verifierades import → SQLite-kö → lokal KB-Whisper large CUDA FP16 → resultatlagring med en tyst 3-sekunders WAV. Tyst ljud gav noll textsegment med VAD. Ett separat test med ett explicit ljudfönster verifierade GPU-inferens och ordtidsstämpling; det mäter inte taligenkänningens kvalitet. Den engelska large-v3-modellen är också installerad, men dess taligenkänningskvalitet återstår att bedöma.
 
