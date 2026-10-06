@@ -182,6 +182,7 @@ export class ImagesView {
   private editWorkflow(existing?: SavedWorkflow) {
     let workflow = existing ? structuredClone(existing.workflow) : null;
     const dialog = document.createElement('dialog');
+    dialog.className = 'workflow-dialog';
     dialog.innerHTML = `<form class="workflow-form"><h2>${existing ? 'Ändra sparat flöde' : 'Lägg till ComfyUI-flöde'}</h2><label>Namn<input id="workflow-name" maxlength="120" required value="${this.esc(existing?.name ?? '')}" placeholder="Exempel: Foto, illustration eller landskap" /></label><label>JSON i API-format<input id="workflow-file" type="file" accept=".json,application/json" ${existing ? '' : 'required'} /></label><small>Exportera i API-format från ComfyUI. ${existing ? 'Välj en ny fil om du vill ersätta detta flöde.' : ''}</small><label>Textfält för bildprompten<select id="workflow-input" required></select></label><div class="dialog-actions"><button type="button" class="secondary" id="workflow-cancel">Avbryt</button><button type="submit" class="primary">Spara flöde</button></div></form>`;
     const fields = () => {
       const select = dialog.querySelector<HTMLSelectElement>('#workflow-input')!;
