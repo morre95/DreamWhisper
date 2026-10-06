@@ -7,7 +7,7 @@ let handle;
 globalThis.__journalTestBridge = { invoke: (...args) => handle(...args), convertFileSrc: path => path, isTauri: () => true };
 const source = readFileSync(new URL('../src/journal.ts', import.meta.url), 'utf8')
   .replace(/import .* from '@tauri-apps\/api\/core';/, 'const { invoke, convertFileSrc, isTauri } = globalThis.__journalTestBridge;')
-  .replace(/import .* from '\.\/images';/, 'const esc = value => String(value);');
+  .replace(/import .* from '\.\/images';/, 'const esc = value => String(value); const showWorkflowEditor = () => {};');
 const code = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
 const { JournalView, composeScene, latestDrafts } = await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
 
@@ -92,4 +92,32 @@ test('scene edits during a save become a child of the saved revision and keep ap
     assert.deepEqual(writes.map(w => [w.id,w.prompt]), [['old','First'],['new-1','Newest']]);
     assert.deepEqual([...view.selected], ['new-2']); assert.equal(view.dirty,false);
   } finally { restore(); }
+});
+
+
+test('imported workflows become selectable while an unsaved scene prompt stays intact', async () => {
+  const select = { dataset: {}, innerHTML: '' };
+  const hint = { textContent: '' };
+  const results = { querySelector: () => null };
+  const container = { querySelector: selector => ({ '#journal-workflow': select, '#journal-workflow-hint': hint, '#journal-results': results })[selector] ?? null };
+  const view = new JournalView(container, () => {}, () => {});
+  view.visible = true; view.entry = entry();
+  const edit = { prompt: 'My unfinished scene changes' };
+  view.edits.set('scene', edit);
+  view.renderList = () => {};
+  view.updateButtons = () => {};
+  view.workflowId = 'imported';
+  handle = async command => {
+    if (command === 'journal_snapshot') return { entries: [entry()], drafts: [], jobs: [], descriptions: [] };
+    assert.equal(command, 'image_snapshot');
+    return { jobs: [], workflows: [{ id: 'old', name: 'Existing' }, { id: 'imported', name: 'New workflow' }], settings: { selected_workflow_id: 'imported' } };
+  };
+  await view.refresh();
+  assert.match(select.innerHTML, /value="imported" selected>New workflow/);
+  assert.equal(view.edits.get('scene'), edit);
+  assert.equal(edit.prompt, 'My unfinished scene changes');
+  // A later global selection change must preserve the workflow chosen in Journal.
+  view.workflowId = 'old';
+  await view.refresh();
+  assert.match(select.innerHTML, /value="old" selected>Existing/);
 });

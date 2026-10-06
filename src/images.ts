@@ -240,47 +240,12 @@ export class ImagesView {
     })();
   }
   private editWorkflow(existing?: SavedWorkflow) {
-    let workflow = existing ? structuredClone(existing.workflow) : null;
-    const dialog = document.createElement('dialog');
-    dialog.className = 'workflow-dialog';
-    dialog.innerHTML = `<form class="workflow-form"><h2>${existing ? 'Ändra sparat flöde' : 'Lägg till ComfyUI-flöde'}</h2><label>Namn<input id="workflow-name" maxlength="120" required value="${this.esc(existing?.name ?? '')}" placeholder="Exempel: Foto, illustration eller landskap" /></label><label>JSON i API-format<input id="workflow-file" type="file" accept=".json,application/json" ${existing ? '' : 'required'} /></label><small>Exportera i API-format från ComfyUI. ${existing ? 'Välj en ny fil om du vill ersätta detta flöde.' : ''}</small><label>Textfält för positiv prompt<select id="workflow-input" required></select></label><label>Textfält för negativ prompt (valfritt)<select id="workflow-negative-input"></select></label><div class="dialog-actions"><button type="button" class="secondary" id="workflow-cancel">Avbryt</button><button type="submit" class="primary">Spara flöde</button></div></form>`;
-    const fields = () => {
-      const select = dialog.querySelector<HTMLSelectElement>('#workflow-input')!;
-      select.innerHTML = '<option value="">Välj promptfält…</option>' + (workflow ? workflowFields(workflow) : []).map(f => `<option value="${this.esc(JSON.stringify({ node: f.node, input: f.input }))}" ${existing && f.node === existing.node_id && f.input === existing.input_name ? 'selected' : ''}>${this.esc(f.title)}</option>`).join('');
-      dialog.querySelector<HTMLSelectElement>('#workflow-negative-input')!.innerHTML = '<option value="">Ingen negativ prompt – behåll flödets inställningar</option>' + (workflow ? workflowFields(workflow) : []).map(f => `<option value="${this.esc(JSON.stringify({ node: f.node, input: f.input }))}" ${existing?.negative_field && f.node === existing.negative_field.node_id && f.input === existing.negative_field.input_name ? 'selected' : ''}>${this.esc(f.title)}</option>`).join('');
-    };
-    fields();
-    dialog.querySelector<HTMLInputElement>('#workflow-file')!.onchange = event => void (async () => {
-      const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return;
-      try {
-        if (file.size > 5 * 1024 * 1024) throw new Error('Workflow-filen är större än 5 MB.');
-        const imported = JSON.parse(await file.text());
-        if (!workflowFields(imported).length) throw new Error('Workflow saknar redigerbara textfält.');
-        workflow = imported;
-        const name = dialog.querySelector<HTMLInputElement>('#workflow-name')!;
-        if (!name.value.trim()) name.value = file.name.replace(/\.json$/i, '');
-        fields();
-      } catch (e) { workflow = existing ? structuredClone(existing.workflow) : null; fields(); this.notify(String(e), true); }
-    })();
-    dialog.querySelector('#workflow-cancel')!.addEventListener('click', () => dialog.close());
-    dialog.onclose = () => dialog.remove();
-    dialog.querySelector('form')!.onsubmit = event => { event.preventDefault(); void (async () => {
-      const button = dialog.querySelector<HTMLButtonElement>('button[type=submit]')!; button.disabled = true;
-      try {
-        const field = JSON.parse(dialog.querySelector<HTMLSelectElement>('#workflow-input')!.value || 'null');
-        const negative = JSON.parse(dialog.querySelector<HTMLSelectElement>('#workflow-negative-input')!.value || 'null');
-        if (!workflow || !field) throw new Error('Importera API-JSON och välj positivt promptfält.');
-        if (negative && negative.node === field.node && negative.input === field.input) throw new Error('Positiv och negativ prompt måste använda olika textfält.');
-        await invoke('save_workflow', { workflow: { id: existing?.id ?? '', name: dialog.querySelector<HTMLInputElement>('#workflow-name')!.value.trim(), workflow, node_id: field.node, input_name: field.input, negative_field: negative ? { node_id: negative.node, input_name: negative.input } : null } });
-        dialog.close(); await this.refresh(); this.notify('Flödet är sparat och valt för nästa bild.');
-      } catch (e) { this.notify(String(e), true); button.disabled = false; }
-    })(); };
-    document.body.append(dialog); dialog.showModal();
+    showWorkflowEditor(this.notify, async () => { await this.refresh(); }, existing);
   }
   showSettings() {
     const container = this.configContainer(); if (!container) return;
     const settings = this.snapshot?.settings;
-    container.innerHTML = `<h2>ComfyUI – server</h2><p>Dina bildflöden importeras och väljs under Bilder.</p><label>ComfyUI-adress<input id="comfy-url" value="${this.esc(settings?.url ?? 'http://127.0.0.1:8188')}" spellcheck="false" /></label><label>ComfyUI-mapp<input id="comfy-directory" value="${this.esc(settings?.comfy_directory)}" placeholder="/home/ditt-namn/comfy/ComfyUI" spellcheck="false" /></label><label>ComfyUI:s Pythonprogram<input id="comfy-python" value="${this.esc(settings?.comfy_python_path)}" placeholder="/home/ditt-namn/comfy/ComfyUI/.venv/bin/python" spellcheck="false" /></label><div class="device-actions"><button id="comfy-start" class="primary">Starta ComfyUI-server</button><button id="comfy-test" class="secondary">Testa anslutning</button><button id="comfy-save" class="secondary">Spara serverinställningar</button></div><p id="comfy-server-status" role="status" class="muted"></p><small>Servern startas lokalt utan att öppna webbläsaren. En server startad av DreamWhisper avslutas när du väljer Avsluta i systemfältet. En server du startat separat återanvänds.</small><div id="saved-workflow-settings"></div>`;
+    container.innerHTML = `<h2>ComfyUI – server</h2><p>Dina bildflöden importeras och väljs under Journal eller Bilder.</p><label>ComfyUI-adress<input id="comfy-url" value="${this.esc(settings?.url ?? 'http://127.0.0.1:8188')}" spellcheck="false" /></label><label>ComfyUI-mapp<input id="comfy-directory" value="${this.esc(settings?.comfy_directory)}" placeholder="/home/ditt-namn/comfy/ComfyUI" spellcheck="false" /></label><label>ComfyUI:s Pythonprogram<input id="comfy-python" value="${this.esc(settings?.comfy_python_path)}" placeholder="/home/ditt-namn/comfy/ComfyUI/.venv/bin/python" spellcheck="false" /></label><div class="device-actions"><button id="comfy-start" class="primary">Starta ComfyUI-server</button><button id="comfy-test" class="secondary">Testa anslutning</button><button id="comfy-save" class="secondary">Spara serverinställningar</button></div><p id="comfy-server-status" role="status" class="muted"></p><small>Servern startas lokalt utan att öppna webbläsaren. En server startad av DreamWhisper avslutas när du väljer Avsluta i systemfältet. En server du startat separat återanvänds.</small><div id="saved-workflow-settings"></div>`;
     const connection = () => ({ url: container.querySelector<HTMLInputElement>('#comfy-url')!.value.trim(), comfy_directory: container.querySelector<HTMLInputElement>('#comfy-directory')!.value.trim(), comfy_python_path: container.querySelector<HTMLInputElement>('#comfy-python')!.value.trim() });
     container.querySelector<HTMLButtonElement>('#comfy-save')!.onclick = () => void (async () => {
       try { await invoke('save_comfy_connection', { settings: connection() }); await this.refresh(); this.notify('Serverinställningar sparade.'); }
@@ -309,7 +274,7 @@ export class ImagesView {
     const signature = JSON.stringify([workflows.map(w => [w.id, w.name]), selected]);
     if (target.dataset.rendered === signature) return;
     target.dataset.rendered = signature;
-    target.innerHTML = `<h3>Sparade bildflöden</h3><p>Ta bort flöden du inte längre vill använda. Bildhistorik, köade jobb och sparade bilder behålls.</p>${workflows.length ? workflows.map(w => `<div class="workflow-settings-row"><div><b>${this.esc(w.name)}</b>${w.id === selected ? '<small>Valt för nästa bild</small>' : ''}</div><button type="button" class="secondary small" data-delete-workflow="${this.esc(w.id)}">Ta bort</button></div>`).join('') : '<p class="muted">Inga sparade flöden. Lägg till ett flöde under Bilder.</p>'}`;
+    target.innerHTML = `<h3>Sparade bildflöden</h3><p>Ta bort flöden du inte längre vill använda. Bildhistorik, köade jobb och sparade bilder behålls.</p>${workflows.length ? workflows.map(w => `<div class="workflow-settings-row"><div><b>${this.esc(w.name)}</b>${w.id === selected ? '<small>Valt för nästa bild</small>' : ''}</div><button type="button" class="secondary small" data-delete-workflow="${this.esc(w.id)}">Ta bort</button></div>`).join('') : '<p class="muted">Inga sparade flöden. Lägg till ett flöde under Journal eller Bilder.</p>'}`;
     target.querySelectorAll<HTMLButtonElement>('[data-delete-workflow]').forEach(button => button.onclick = () => void (async () => {
       const workflow = workflows.find(w => w.id === button.dataset.deleteWorkflow)!;
       if (!window.confirm(`Ta bort flödet ”${workflow.name}”? Tidigare bilder och bildjobb finns kvar.${workflow.id === selected ? ' Nästa sparade flöde väljs i stället.' : ''}`)) return;
@@ -329,4 +294,43 @@ export class ImagesView {
       container!.querySelector<HTMLButtonElement>('#comfy-start')!.disabled = this.serverStarting || ['starting', 'running'].includes(server.status);
     } catch (e) { text.textContent = String(e); }
   }
+}
+
+export function showWorkflowEditor(notify: (text: string, error?: boolean) => void, onSaved: (id: string) => Promise<void>, existing?: SavedWorkflow) {
+  let workflow = existing ? structuredClone(existing.workflow) : null;
+  const dialog = document.createElement('dialog');
+  dialog.className = 'workflow-dialog';
+  dialog.innerHTML = `<form class="workflow-form"><h2>${existing ? 'Ändra sparat flöde' : 'Lägg till ComfyUI-flöde'}</h2><label>Namn<input id="workflow-name" maxlength="120" required value="${escapeHtml(existing?.name ?? '')}" placeholder="Exempel: Foto, illustration eller landskap" /></label><label>JSON i API-format<input id="workflow-file" type="file" accept=".json,application/json" ${existing ? '' : 'required'} /></label><small>Exportera i API-format från ComfyUI. ${existing ? 'Välj en ny fil om du vill ersätta detta flöde.' : ''}</small><label>Textfält för positiv prompt<select id="workflow-input" required></select></label><label>Textfält för negativ prompt (valfritt)<select id="workflow-negative-input"></select></label><div class="dialog-actions"><button type="button" class="secondary" id="workflow-cancel">Avbryt</button><button type="submit" class="primary">Spara flöde</button></div></form>`;
+  const fields = () => {
+    const select = dialog.querySelector<HTMLSelectElement>('#workflow-input')!;
+    select.innerHTML = '<option value="">Välj promptfält…</option>' + (workflow ? workflowFields(workflow) : []).map(f => `<option value="${escapeHtml(JSON.stringify({ node: f.node, input: f.input }))}" ${existing && f.node === existing.node_id && f.input === existing.input_name ? 'selected' : ''}>${escapeHtml(f.title)}</option>`).join('');
+    dialog.querySelector<HTMLSelectElement>('#workflow-negative-input')!.innerHTML = '<option value="">Ingen negativ prompt – behåll flödets inställningar</option>' + (workflow ? workflowFields(workflow) : []).map(f => `<option value="${escapeHtml(JSON.stringify({ node: f.node, input: f.input }))}" ${existing?.negative_field && f.node === existing.negative_field.node_id && f.input === existing.negative_field.input_name ? 'selected' : ''}>${escapeHtml(f.title)}</option>`).join('');
+  };
+  fields();
+  dialog.querySelector<HTMLInputElement>('#workflow-file')!.onchange = event => void (async () => {
+    const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return;
+    try {
+      if (file.size > 5 * 1024 * 1024) throw new Error('Workflow-filen är större än 5 MB.');
+      const imported = JSON.parse(await file.text());
+      if (!workflowFields(imported).length) throw new Error('Workflow saknar redigerbara textfält.');
+      workflow = imported;
+      const name = dialog.querySelector<HTMLInputElement>('#workflow-name')!;
+      if (!name.value.trim()) name.value = file.name.replace(/\.json$/i, '');
+      fields();
+    } catch (e) { workflow = existing ? structuredClone(existing.workflow) : null; fields(); notify(String(e), true); }
+  })();
+  dialog.querySelector('#workflow-cancel')!.addEventListener('click', () => dialog.close());
+  dialog.onclose = () => dialog.remove();
+  dialog.querySelector('form')!.onsubmit = event => { event.preventDefault(); void (async () => {
+    const button = dialog.querySelector<HTMLButtonElement>('button[type=submit]')!; button.disabled = true;
+    try {
+      const field = JSON.parse(dialog.querySelector<HTMLSelectElement>('#workflow-input')!.value || 'null');
+      const negative = JSON.parse(dialog.querySelector<HTMLSelectElement>('#workflow-negative-input')!.value || 'null');
+      if (!workflow || !field) throw new Error('Importera API-JSON och välj positivt promptfält.');
+      if (negative && negative.node === field.node && negative.input === field.input) throw new Error('Positiv och negativ prompt måste använda olika textfält.');
+      const id = await invoke<string>('save_workflow', { workflow: { id: existing?.id ?? '', name: dialog.querySelector<HTMLInputElement>('#workflow-name')!.value.trim(), workflow, node_id: field.node, input_name: field.input, negative_field: negative ? { node_id: negative.node, input_name: negative.input } : null } });
+      dialog.close(); await onSaved(id); notify('Flödet är sparat och valt för nästa bild.');
+    } catch (e) { notify(String(e), true); button.disabled = false; }
+  })(); };
+  document.body.append(dialog); dialog.showModal();
 }

@@ -1,5 +1,5 @@
 import { invoke, convertFileSrc, isTauri } from '@tauri-apps/api/core';
-import { escapeHtml as esc } from './images';
+import { escapeHtml as esc, showWorkflowEditor } from './images';
 import type { ImageJob, SavedWorkflow } from './images';
 
 export interface JournalEntry {
@@ -41,6 +41,7 @@ export class JournalView {
   private serial: Promise<void> = Promise.resolve();
   private editSequence = 0;
   private signature = '';
+  private workflowId: string | null = null;
   private working = false;
   private draftRequest: { key: string; id: string } | null = null;
   private imageRequest: { key: string; id: string } | null = null;
@@ -58,7 +59,7 @@ export class JournalView {
     const [snapshot, images] = await Promise.all([invoke<JournalSnapshot>('journal_snapshot'), invoke<ImageSnapshot>('image_snapshot')]);
     this.snapshot = snapshot; this.images = images;
     if (this.entry && !this.entryDirty) this.entry = snapshot.entries.find(e => e.id === this.entry!.id) ?? this.entry;
-    if (this.visible) { this.renderList(); this.renderResults(); }
+    if (this.visible) { this.renderList(); this.renderResults(); this.renderWorkflowChoice(); }
   }
   async show() {
     this.visible = true;
@@ -192,18 +193,23 @@ export class JournalView {
     if (!force && (this.edits.size || target.querySelector<HTMLTextAreaElement>('#manual-prompt')?.value || signature === this.signature)) return;
     this.signature = signature;
     const workflows = this.images?.workflows ?? [];
-    const selectedWorkflow = target.querySelector<HTMLSelectElement>('#journal-workflow')?.value ?? this.images?.settings.selected_workflow_id;
+    const selectedWorkflow = this.workflowId ?? this.images?.settings.selected_workflow_id;
     const revisions = this.snapshot.descriptions.filter(r => r.entry_id === e.id);
     target.innerHTML = `<div class="journal-review"><h2>Scener och bildpromptar</h2><p class="muted">Granska detaljer och kreativa tillägg. Bildprompten är på engelska och kan ändras. Ett citat hjälper dig att kontrollera källan; granska även modellens tolkning.</p>
       ${!this.snapshot.setup_ready ? '<p class="notice">Språkmodellen behöver installeras. Se README och Inställningar. Du kan alltid skriva en egen prompt.</p>' : ''}
       <label>Bildflöde<select id="journal-workflow"><option value="">Välj sparat ComfyUI-flöde…</option>${workflows.map(w => `<option value="${esc(w.id)}" ${w.id === selectedWorkflow ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select></label>
-      ${!workflows.length ? '<p class="muted">Importera ett ComfyUI-flöde under Bilder innan du genererar.</p>' : ''}
+      <div class="device-actions"><button id="journal-add-workflow" class="secondary">Lägg till flöde</button></div>
+      <p id="journal-workflow-hint" class="muted"></p>
       <div class="device-actions"><button id="combine-scenes" class="secondary">Kombinera valda scener</button><button id="generate-all-scenes" class="primary">Generera alla scener separat</button></div>
       <div id="scene-cards">${current.map(d => this.card(d)).join('') || '<p class="muted">Skapa scenutkast eller skriv en egen prompt nedan.</p>'}</div>
       <details><summary>Skriv en egen scenprompt</summary><label>Engelsk bildprompt<textarea id="manual-prompt" rows="4"></textarea></label><button id="manual-scene" class="secondary">Spara scen för granskning</button></details>
       <section><h3>Utkastjobb</h3>${jobs.map(j => `<article class="settings-card"><b>${esc(({ queued: 'I kön', running: 'Skapar utkast', completed: 'Klart', failed: 'Misslyckat' } as Record<string, string>)[j.status] ?? j.status)}</b>${j.description_revision !== e.description_revision ? '<p class="muted">Tillhör en tidigare beskrivning.</p>' : ''}${j.error ? `<p class="inline-error">${esc(j.error)}</p><button data-retry-draft="${esc(j.id)}" class="secondary small">Försök igen</button>` : ''}</article>`).join('') || '<p class="muted">Inga utkastjobb ännu.</p>'}</section>
       <section><h3>Bilder och försök</h3>${images.map(job => `<article class="settings-card"><b>${esc(job.config.workflow_name)} · ${esc(({queued:'I kön',submitting:'Skickar',queued_comfy:'I ComfyUI-kön',running:'Skapar bild',downloading:'Hämtar',completed:'Klar',failed:'Misslyckad',uncertain:'Osäker'} as Record<string,string>)[job.status] ?? job.status)}</b>${job.error ? `<p class="inline-error">${esc(job.error)}</p>` : ''}<details><summary>Exakt bildprompt och flöde</summary><p class="image-prompt-preview">${esc(job.draft.prompt)}</p><p>${esc(job.draft.negative_prompt ?? '')}</p><pre>${esc(JSON.stringify(job.config.workflow, null, 2))}</pre></details><div class="image-gallery">${job.images.filter(i => !i.deleted).map(i => `<div><button class="image-thumbnail" data-preview="${esc(i.path)}"><img src="${esc(convertFileSrc(i.path))}" alt="${esc(job.draft.prompt)}" loading="lazy" /></button><button class="secondary small" data-favourite="${esc(i.path)}">${e.favourite_image === i.path ? '★ Favorit · avmarkera' : '☆ Välj favorit'}</button><button class="text-button" data-delete-image="${esc(i.path)}" data-job="${esc(job.id)}">Ta bort bild</button></div>`).join('')}</div>${job.prompt_id && ['failed','uncertain'].includes(job.status) && !job.release_pending ? `<button data-follow-image="${esc(job.id)}" class="secondary small">Följ upp / hämta igen</button>` : ''}${job.release_pending && job.error ? `<button data-dismiss-image="${esc(job.id)}" class="secondary small">Avsluta uppföljning</button>` : ''}</article>`).join('') || '<p class="muted">Inga bilder ännu.</p>'}</section>
       <details><summary>Tidigare beskrivningar och utkast</summary>${revisions.map(r => `<article><b>${esc(new Date(r.created_at).toLocaleString('sv-SE'))} · ${esc(r.language)}</b><p class="image-prompt-preview">${esc(r.description)}</p></article>`).join('')}${drafts.filter(d => !current.some(c => c.id === d.id)).map(d => `<article><b>${esc(d.scene.title)} · ${esc(new Date(d.created_at).toLocaleString('sv-SE'))}</b><p class="image-prompt-preview">${esc(d.prompt)}</p></article>`).join('')}</details></div>`;
+    target.querySelector<HTMLButtonElement>('#journal-add-workflow')!.onclick = () => {
+      showWorkflowEditor(this.notify, async id => { this.workflowId = id; await this.refresh(); });
+    };
+    this.renderWorkflowChoice();
     target.querySelector<HTMLButtonElement>('#manual-scene')!.onclick = () => void this.action(async () => {
       const prompt = target.querySelector<HTMLTextAreaElement>('#manual-prompt')!.value;
       await this.flush(); await invoke('manual_scene', { entryId: this.entry!.id, revision: this.entry!.description_revision, prompt }); target.querySelector<HTMLTextAreaElement>('#manual-prompt')!.value = ''; await this.refresh();
@@ -234,6 +240,20 @@ export class JournalView {
       dialog.innerHTML = `<button class="secondary">Stäng</button><img src="${esc(convertFileSrc(b.dataset.preview!))}" alt="Sparad bild" />`;
       dialog.querySelector('button')!.onclick = () => dialog.close(); dialog.onclose = () => dialog.remove(); document.body.append(dialog); dialog.showModal();
     });
+    this.updateButtons();
+  }
+  private renderWorkflowChoice() {
+    const select = this.container.querySelector<HTMLSelectElement>('#journal-workflow');
+    if (!select) return;
+    const workflows = this.images?.workflows ?? [];
+    const selected = this.workflowId ?? this.images?.settings.selected_workflow_id;
+    const signature = JSON.stringify([workflows.map(w => [w.id, w.name]), selected]);
+    if (select.dataset.rendered !== signature) {
+      select.dataset.rendered = signature;
+      select.innerHTML = '<option value="">Välj sparat ComfyUI-flöde…</option>' + workflows.map(w => `<option value="${esc(w.id)}" ${w.id === selected ? 'selected' : ''}>${esc(w.name)}</option>`).join('');
+    }
+    const hint = this.container.querySelector<HTMLElement>('#journal-workflow-hint');
+    if (hint) hint.textContent = workflows.length ? 'Flöden delas med Bilder och sparas lokalt. Välj flöde för nästa generation.' : 'Välj Lägg till flöde och importera ComfyUI-JSON i API-format innan du genererar.';
     this.updateButtons();
   }
   private card(d: SceneDraft) {
@@ -282,7 +302,7 @@ export class JournalView {
     const current = latestDrafts(this.snapshot?.drafts.filter(d => d.entry_id === this.entry?.id) ?? []).filter(d => d.description_revision === this.entry?.description_revision);
     const workflow = target.querySelector<HTMLSelectElement>('#journal-workflow');
     const canGenerate = !!workflow?.value && !this.edits.size && !this.entryDirty;
-    if (workflow) workflow.onchange = () => this.updateButtons();
+    if (workflow) workflow.onchange = () => { this.workflowId = workflow.value; this.updateButtons(); };
     target.querySelectorAll<HTMLButtonElement>('[data-generate]').forEach(button => {
       const key = (button.closest('[data-scene]') as HTMLElement).dataset.scene;
       button.disabled = !canGenerate || !current.find(d => d.id === key)?.approved;
