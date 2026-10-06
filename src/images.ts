@@ -35,7 +35,7 @@ export class ImagesView {
   private saveTimer: ReturnType<typeof setTimeout> | undefined;
   private setup: ComfySettings | null = null;
   private visible = false;
-  private disposed = false;
+  private creating = false;
   private readonly esc = escapeHtml;
   constructor(private readonly container: HTMLElement, private readonly configContainer: () => HTMLElement | null, private readonly notify: (text: string, error?: boolean) => void, private readonly openRecording: (id: string, runId: string | null) => void) {}
   async refresh() {
@@ -73,7 +73,7 @@ export class ImagesView {
     const draft = { ...this.draft };
     this.saving = invoke<void>('save_image_draft', { draft }).then(() => { this.persistedVersion = version; });
     try { await this.saving; } finally { this.saving = null; }
-    if (!this.disposed && this.persistedVersion !== this.draftVersion) await this.persist();
+    if (this.persistedVersion !== this.draftVersion) await this.persist();
   }
   private render() {
     const esc = this.esc;
@@ -95,14 +95,17 @@ export class ImagesView {
   }
   private updateCreateButton() {
     const button = this.container.querySelector<HTMLButtonElement>('#generate-image');
-    if (button) button.disabled = !isTauri() || !this.draft.prompt.trim() || !this.snapshot?.settings.node_id;
+    if (button) button.disabled = this.creating || !isTauri() || !this.draft.prompt.trim() || !this.snapshot?.settings.node_id;
   }
   private async create() {
+    if (this.creating) return;
+    this.creating = true;
+    const draft = { ...this.draft };
     const button = this.container.querySelector<HTMLButtonElement>('#generate-image')!;
     button.disabled = true;
-    try { await this.persist(); await invoke('create_image', { draft: { ...this.draft } }); this.notify('Bildjobbet har lagts i kön.'); await this.refresh(); }
+    try { await this.persist(); await invoke('create_image', { draft }); this.notify('Bildjobbet har lagts i kön.'); await this.refresh(); }
     catch (e) { this.notify(String(e), true); }
-    finally { this.updateCreateButton(); }
+    finally { this.creating = false; this.updateCreateButton(); }
   }
   private renderJobs() {
     const target = this.container.querySelector<HTMLElement>('#image-jobs');
@@ -114,7 +117,7 @@ export class ImagesView {
       ${job.error ? `<p class="inline-error">${esc(job.error)}</p>` : ''}
       <details><summary>Bildprompt och workflow</summary><p class="image-prompt-preview">${esc(job.draft.prompt)}</p><small>${esc(job.config.workflow_name)}</small></details>
       <div class="image-gallery">${job.images.map(image => `<a href="${esc(convertFileSrc(image.path))}" target="_blank" rel="noopener" data-image-preview="${esc(image.path)}"><img src="${esc(convertFileSrc(image.path))}" loading="lazy" alt="Bild skapad från den sparade bildprompten" /></a>`).join('')}</div>
-      <div class="device-actions"><button class="secondary small" data-reuse-image="${esc(job.id)}">Använd prompt igen</button>${job.draft.recording_id ? `<button class="secondary small" data-image-source="${esc(job.id)}">Öppna inspelningen</button>` : ''}${job.prompt_id && ['failed', 'uncertain'].includes(job.status) && !job.release_pending ? `<button class="secondary small" data-follow-image="${esc(job.id)}">Följ upp / hämta igen</button>` : ''}</div>
+      <div class="device-actions"><button class="secondary small" data-reuse-image="${esc(job.id)}">Använd prompt igen</button>${job.draft.recording_id ? `<button class="secondary small" data-image-source="${esc(job.id)}">Öppna inspelningen</button>` : ''}${job.prompt_id && ['failed', 'uncertain'].includes(job.status) && !job.release_pending ? `<button class="secondary small" data-follow-image="${esc(job.id)}">Följ upp / hämta igen</button>` : ''}${job.release_pending && job.error ? `<button class="secondary small" data-dismiss-image="${esc(job.id)}">Avsluta uppföljning</button>` : ''}</div>
       </article>`).join('') : '<div class="settings-card"><p class="muted">Här visas bildjobben och dina sparade bilder.</p></div>';
     // Preserve focus and image loading when the poll contains no changes.
     if (target.dataset.rendered === html) return;
@@ -128,6 +131,12 @@ export class ImagesView {
       const job = jobs.find(j => j.id === button.dataset.imageSource)!;
       this.openRecording(job.draft.recording_id!, job.draft.run_id);
     });
+    target.querySelectorAll<HTMLButtonElement>('[data-dismiss-image]').forEach(button => button.onclick = () => void (async () => {
+      if (!window.confirm('Kontrollera först att ComfyUI inte kör bildjobbet. Uppföljningen avslutas och Whisper får starta igen. Detta avbryter inte jobbet i ComfyUI. Fortsätta?')) return;
+      button.disabled = true;
+      try { await invoke('dismiss_image_job', { id: button.dataset.dismissImage }); await this.refresh(); }
+      catch (e) { this.notify(String(e), true); button.disabled = false; }
+    })());
     target.querySelectorAll<HTMLButtonElement>('[data-follow-image]').forEach(button => button.onclick = () => void (async () => {
       button.disabled = true;
       try { await invoke('follow_image_job', { id: button.dataset.followImage }); await this.refresh(); }

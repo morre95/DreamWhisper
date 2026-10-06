@@ -15,7 +15,10 @@ fn image_snapshot(state: State<'_, AppState>) -> ApiResult<crate::images::ImageS
     state.db.image_snapshot().map_err(err)
 }
 #[tauri::command]
-fn save_comfy_settings(state: State<'_, AppState>, settings: crate::images::ComfySettings) -> ApiResult<()> {
+fn save_comfy_settings(
+    state: State<'_, AppState>,
+    settings: crate::images::ComfySettings,
+) -> ApiResult<()> {
     state.db.save_comfy_settings(&settings).map_err(err)
 }
 #[tauri::command]
@@ -27,12 +30,30 @@ fn create_image(state: State<'_, AppState>, draft: crate::images::ImageDraft) ->
     state.db.enqueue_image(draft).map_err(err)
 }
 #[tauri::command]
-fn follow_image_job(state: State<'_, AppState>, id: String) -> ApiResult<()> {
-    state.db.retry_image_download(&id).map_err(err)
+async fn dismiss_image_job(state: State<'_, AppState>, id: String) -> ApiResult<()> {
+    let service = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = service.image_operations.lock().unwrap();
+        service.db.dismiss_image_job(&id).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+#[tauri::command]
+async fn follow_image_job(state: State<'_, AppState>, id: String) -> ApiResult<()> {
+    let service = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = service.image_operations.lock().unwrap();
+        service.db.retry_image_download(&id).map_err(err)
+    })
+    .await
+    .map_err(err)?
 }
 #[tauri::command]
 async fn test_comfy_connection(url: String) -> ApiResult<()> {
-    tauri::async_runtime::spawn_blocking(move || crate::images::test_connection(&url).map_err(err)).await.map_err(err)?
+    tauri::async_runtime::spawn_blocking(move || crate::images::test_connection(&url).map_err(err))
+        .await
+        .map_err(err)?
 }
 #[tauri::command]
 fn snapshot(state: State<'_, AppState>) -> ApiResult<Snapshot> {
@@ -153,7 +174,8 @@ pub fn run() {
             let service = Service::open(root.clone())?;
             app.asset_protocol_scope()
                 .allow_directory(root.join("archive"), true)?;
-            app.asset_protocol_scope().allow_directory(root.join("images"), true)?;
+            app.asset_protocol_scope()
+                .allow_directory(root.join("images"), true)?;
             let development = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../worker/worker.py");
             let script = if cfg!(debug_assertions) && development.is_file() {
                 development
@@ -208,6 +230,7 @@ pub fn run() {
             save_image_draft,
             create_image,
             follow_image_job,
+            dismiss_image_job,
             test_comfy_connection,
             snapshot,
             import_folder,

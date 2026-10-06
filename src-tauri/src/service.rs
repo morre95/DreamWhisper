@@ -26,6 +26,7 @@ pub struct Service {
     pub root: PathBuf,
     runtime: Mutex<Runtime>,
     importing: Mutex<()>,
+    pub image_operations: Mutex<()>,
     pub stop: AtomicBool,
     worker_revision: AtomicU64,
     _lock: File,
@@ -42,6 +43,7 @@ impl Service {
         lock.try_lock_exclusive()
             .context("DreamWhisper körs redan med detta arkiv")?;
         let db = Database::open(&root)?;
+        std::fs::create_dir_all(root.join("images"))?;
         let recovery = archive::reconcile(&db, &root)?;
         Ok(Arc::new(Self {
             db,
@@ -55,6 +57,7 @@ impl Service {
                 ..Runtime::default()
             }),
             importing: Mutex::new(()),
+            image_operations: Mutex::new(()),
             stop: AtomicBool::new(false),
             worker_revision: AtomicU64::new(0),
             _lock: lock,
@@ -249,20 +252,29 @@ impl Service {
             let mut revision = 0;
             while !service.stop.load(Ordering::Relaxed) {
                 let result = (|| -> Result<()> {
+                    let image_guard = service.image_operations.lock().unwrap();
                     if let Some(job) = service.db.next_image_job()? {
                         // This supervisor also owns Whisper: dropping it here is an
                         // acknowledged GPU handoff, never concurrent generation.
                         worker = None;
                         service.worker_state("awaiting_images", None);
                         service.activity("Transkribering väntar medan ComfyUI använder GPU:n");
-                        if let Err(e) = crate::images::step(&service.db, &service.root, job.clone()) {
-                            let mut current = service.db.image_jobs()?.into_iter().find(|j| j.id == job.id).unwrap_or(job);
-                            current.error = Some(format!("Anslutningen till ComfyUI avbröts: {e:#}. Försöker följa upp igen; inget nytt jobb skickas."));
+                        if let Err(e) = crate::images::step(&service.db, &service.root, job.clone())
+                        {
+                            let mut current = service
+                                .db
+                                .image_jobs()?
+                                .into_iter()
+                                .find(|j| j.id == job.id)
+                                .unwrap_or(job);
+                            current.error = Some(format!("Bildjobbet kunde inte följas upp: {e:#}. Försöker följa upp igen; inget nytt jobb skickas."));
                             service.db.save_image_job(&current)?;
                         }
+                        drop(image_guard);
                         std::thread::sleep(Duration::from_secs(2));
                         return Ok(());
                     }
+                    drop(image_guard);
                     let settings = service.db.settings(&service.root)?;
                     let config = serde_json::to_string(&settings)?;
                     let next_revision = service.worker_revision.load(Ordering::Relaxed);
@@ -303,7 +315,9 @@ impl Service {
                         service.worker_state("paused", None);
                         return Ok(());
                     }
-                    if service.db.next_image_job()?.is_some() { return Ok(()); }
+                    if service.db.next_image_job()?.is_some() {
+                        return Ok(());
+                    }
                     let Some(job) = service.db.claim()? else {
                         service.worker_state("ready", None);
                         std::thread::sleep(Duration::from_millis(500));

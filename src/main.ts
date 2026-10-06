@@ -1,5 +1,6 @@
 import { invoke, convertFileSrc, isTauri } from '@tauri-apps/api/core';
 import { ArchiveAudio } from './audio';
+import { ImagesView, selectedText } from './images';
 import type { Device, ImportReport, Recording, Run, Settings, Snapshot, Transcript } from './types';
 import './style.css';
 
@@ -16,7 +17,8 @@ let selected: string | null = null;
 let activeRun: string | null = null;
 let loaded: Transcript | null = null;
 let audioSource: ArchiveAudio | null = null;
-let page: 'library' | 'queue' | 'devices' | 'settings' = 'library';
+let selectionEvents: AbortController | null = null;
+let page: 'library' | 'queue' | 'images' | 'devices' | 'settings' = 'library';
 let filter = '';
 let loadSequence = 0;
 let dirty = false;
@@ -36,6 +38,7 @@ app.innerHTML = `
     <nav aria-label="Huvudmeny">
       <button data-page="library" class="nav active">${icons.library}Inspelningar<span id="count">0</span></button>
       <button data-page="queue" class="nav">${icons.wave}Arbetskö<span id="queue-count">0</span></button>
+      <button data-page="images" class="nav">${icons.plus}Bilder</button>
       <button data-page="devices" class="nav">${icons.device}Diktafon</button>
       <button data-page="settings" class="nav">${icons.settings}Inställningar</button>
     </nav>
@@ -50,11 +53,17 @@ app.innerHTML = `
       <div class="workspace"><section class="recording-panel"><div class="list-head"><h2>Bibliotek</h2><span id="list-count">0 filer</span></div><label class="search-label"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="Sök namn eller transkript…" aria-label="Sök inspelningar" /></label><div id="recording-list"></div></section>
       <section class="detail-panel" id="detail"><div class="detail-empty"><span class="empty-icon">${icons.wave}</span><h2>En tanke börjar med din röst</h2><p>Anslut din Sony-diktafon eller importera en mapp med inspelningar. Välj sedan en fil för att lyssna och läsa.</p><span class="format-note">MP3 & WAV · SVENSK TRANSKRIBERING</span></div></section></div>
     </section>
-    <section id="queue-page" class="hidden"></section><section id="devices-page" class="hidden"></section><section id="settings-page" class="hidden"></section>
+    <section id="images-page" class="hidden"></section><section id="queue-page" class="hidden"></section><section id="devices-page" class="hidden"></section><section id="settings-page" class="hidden"></section>
     <footer><span id="activity">Redo</span><span id="archive-location"></span></footer>
   </main>
   <dialog id="import-dialog"><form id="import-form"><div class="eyebrow">LOKAL IMPORT</div><h2>Importera inspelningar</h2><p>Ange mappen med ljudfiler. Undermappar tas med och originalen bevaras.</p><label>Mappens fullständiga sökväg<input id="import-path" required placeholder="/run/media/ditt-namn/IC RECORDER/PRIVATE/SONY/REC_FILE" /></label><div class="dialog-actions"><button type="button" id="import-cancel" class="secondary">Avbryt</button><button type="submit" class="primary">Importera mapp</button></div></form></dialog>
   <div id="toast" role="status" class="toast hidden"></div>`;
+
+const imagesView = new ImagesView($('#images-page'), () => document.querySelector('#comfy-settings'), toast, (id, runId) => {
+  if (dirty && !window.confirm('Du har osparade rättningar. Lämna dem?')) return;
+  dirty = false;
+  selected = id; navigate('library'); void action(() => loadDetail(id, runId ?? undefined));
+});
 
 function toast(message: string, error = false) {
   clearTimeout(toastTimer);
@@ -73,7 +82,8 @@ async function refresh() {
   refreshing = true;
   try {
     const previous = state;
-    state = await invoke<Snapshot>('snapshot');
+    const [snapshot] = await Promise.all([invoke<Snapshot>('snapshot'), imagesView.refresh()]);
+    state = snapshot;
     $('#count').textContent = String(state.recordings.length);
     $('#stat-all').textContent = String(state.recordings.length);
     $('#stat-done').textContent = String(state.recordings.filter(r => r.status === 'completed').length);
@@ -126,12 +136,14 @@ async function loadDetail(id: string, runId?: string) {
 function renderDetail(recording: Recording, transcript: Transcript, runs: Run[]) {
   audioSource?.dispose();
   audioSource = null;
+  selectionEvents?.abort();
   $('#detail').innerHTML = `
     <div class="detail-head"><div class="eyebrow">INSPELNING</div><h2>${esc(recording.name)}</h2><div class="detail-meta">${esc(date(recording.source_modified_at))}<span>·</span>${(recording.size / 1024 / 1024).toFixed(1)} MB<span>·</span><span class="status ${esc(recording.status)}">${esc(labels[recording.status])}</span></div></div>
     <div class="player"><span class="player-label">ORIGINALLJUD</span><audio id="audio" controls preload="metadata"></audio><div id="audio-error" class="hidden inline-error"></div></div>
     ${recording.error ? `<p class="inline-error">${esc(recording.error)}</p>` : ''}
     <div class="transcript-tools"><h3>Transkript <span>SV</span></h3><div class="tool-actions"><button id="retry" class="text-button" ${['running', 'queued'].includes(recording.status) ? 'disabled' : ''}>${recording.status === 'queued' ? 'Redan i kön' : recording.status === 'running' ? 'Transkriberar' : transcript.run_id ? 'Ny transkribering' : 'Försök igen'}</button>${transcript.run_id ? '<select id="export-format" aria-label="Exportformat"><option value="txt">TXT</option><option value="md">Markdown</option><option value="srt">SRT</option></select><button id="export" class="secondary small">Exportera ↗</button>' : ''}</div></div>
     ${runs.length > 1 ? `<label class="version-label">Version<select id="version">${runs.map((run, i) => `<option value="${esc(run.id)}" ${run.id === transcript.run_id ? 'selected' : ''}>${esc(date(run.created_at))}${i === 0 ? ' · senaste' : ''}</option>`).join('')}</select></label>` : ''}
+    ${transcript.segments.length ? '<details class="image-selection"><summary>Markera text för en bild</summary><p class="muted">Markera valfri text, även över flera stycken. Bildprompten kan ändras innan du skapar bilden.</p><div id="image-transcript-text" class="selectable-transcript" tabindex="0"></div><button id="image-from-selection" class="secondary" disabled>Skapa bild av markering</button></details>' : ''}
     <div class="transcript-content">${transcript.run_id ? (transcript.segments.length ? transcript.segments.map(s => `<article class="segment" data-start="${s.start}" data-end="${s.end}"><button class="timestamp" data-seek="${s.start}" title="Spela från denna tid">${clock(s.start)}</button><textarea data-segment="${s.id}" aria-label="Text vid ${clock(s.start)}" rows="2">${esc(s.edited_text ?? s.text)}</textarea></article>`).join('') : '<p class="transcript-empty">Inget tal hittades i inspelningen.</p>') : `<div class="transcript-empty"><p>${recording.status === 'running' ? 'Din inspelning transkriberas …' : recording.status === 'failed' ? 'Transkriberingen misslyckades. Åtgärda felet och försök igen.' : 'Inspelningen ligger i arbetskön.'}</p><small>${state?.settings.transcription_enabled ? 'Texten visas när transkriberingen är klar.' : 'Kön är pausad. Öppna Arbetskö och välj Starta kön.'}</small></div>`}</div>
     ${transcript.run_id ? '<div class="save-bar"><span id="edit-status">Tidsstämplarna följer originalljudet.</span><button id="save-edits" class="primary small" disabled>Spara rättningar</button></div>' : ''}`;
   const audio = $<HTMLAudioElement>('#audio');
@@ -163,6 +175,29 @@ function renderDetail(recording: Recording, transcript: Transcript, runs: Run[])
     input.oninput = () => { dirty = true; $<HTMLButtonElement>('#save-edits').disabled = false; $('#edit-status').textContent = 'Osparade rättningar'; };
     input.style.height = `${Math.max(input.scrollHeight, 58)}px`;
   });
+  const selectionText = document.querySelector<HTMLElement>('#image-transcript-text');
+  if (selectionText) {
+    const selectionButton = $<HTMLButtonElement>('#image-from-selection');
+    const updateSelectionText = () => {
+      selectionText.textContent = Array.from(document.querySelectorAll<HTMLTextAreaElement>('[data-segment]')).map(input => input.value).join('\n\n');
+      selectionButton.disabled = true;
+    };
+    updateSelectionText();
+    let captured = '';
+    selectionEvents = new AbortController();
+    document.addEventListener('selectionchange', () => {
+      captured = selectedText(selectionText, window.getSelection());
+      selectionButton.disabled = !captured;
+    }, { signal: selectionEvents.signal });
+    document.querySelectorAll<HTMLTextAreaElement>('[data-segment]').forEach(input => input.addEventListener('input', updateSelectionText));
+    selectionButton.onmousedown = event => event.preventDefault();
+    selectionButton.onclick = () => void action(async () => {
+      const text = captured;
+      if (!text) return;
+      if (dirty && !window.confirm('Bildprompten använder dina aktuella rättningar. Lämna osparade transkripträttningar?')) return;
+      if (await imagesView.fromSelection(text, recording.id, transcript.run_id)) { dirty = false; navigate('images'); }
+    });
+  }
   $('#retry').onclick = () => void action(async () => { await invoke('retry_recording', { id: recording.id }); toast(`Inspelningen har lagts i kön.${transcript.run_id ? ' Tidigare transkript finns kvar.' : ''}${state?.settings.transcription_enabled ? '' : ' Kön är pausad – välj Starta kön.'}`); await refresh(); navigate('queue'); });
   document.querySelector<HTMLSelectElement>('#version')?.addEventListener('change', event => {
     if (dirty && !window.confirm('Du har osparade rättningar. Byta version?')) { (event.target as HTMLSelectElement).value = activeRun!; return; }
@@ -192,7 +227,7 @@ async function saveEdits() {
 function queueStatus() {
   if (!state) return 'Hämtar köstatus …';
   if (!state.settings.transcription_enabled) return state.worker_status === 'running' ? 'Pausar efter pågående inspelning' : 'Transkribering pausad';
-  return ({ loading: 'Laddar modellen …', running: 'Transkriberar', error: 'Transkriberingsmotorn behöver åtgärdas', ready: 'Redo för transkribering' } as Record<string, string>)[state.worker_status] ?? 'Startar transkribering …';
+  return ({ loading: 'Laddar modellen …', running: 'Transkriberar', error: 'Transkriberingsmotorn behöver åtgärdas', ready: 'Redo för transkribering', awaiting_images: 'Väntar på bildskapande' } as Record<string, string>)[state.worker_status] ?? 'Startar transkribering …';
 }
 function renderQueue() {
   if (!state) return;
@@ -239,7 +274,8 @@ function deviceCard(d: Device) {
 function renderSettings() {
   if (!state) return;
   const s = state.settings;
-  $('#settings-page').innerHTML = `<div class="page-heading"><div><div class="eyebrow">DIN DATOR, DINA ORD</div><h1>Inställningar</h1><p>Välj din lokala Pythonmiljö och KB-Whisper-modell.</p></div></div><form id="settings-form" class="settings-card settings-form"><h2>Transkribering</h2><p>Installera Pythonmiljön och hämta modellen enligt README innan du aktiverar transkribering.</p><label>Pythonprogrammets sökväg<input name="python_path" value="${esc(s.python_path)}" required spellcheck="false" /></label><label>Modellmapp<input name="model_path" value="${esc(s.model_path)}" required spellcheck="false" /><small>Mappen ska innehålla model.bin och modellens konfigurationsfiler.</small></label><label>Batchstorlek<select name="batch_size">${[1, 2, 4, 8, 16].map(n => `<option ${n === s.batch_size ? 'selected' : ''}>${n}</option>`).join('')}</select><small>Starta med 8. Vid minnesbrist försöker workern med mindre batcher i FP16.</small></label><label class="checkbox-label"><input type="checkbox" name="transcription_enabled" ${s.transcription_enabled ? 'checked' : ''} />Aktivera transkribering</label><label class="checkbox-label"><input type="checkbox" name="auto_import" ${s.auto_import ? 'checked' : ''} />Importera automatiskt från registrerad diktafon</label><label class="checkbox-label"><input type="checkbox" name="start_at_login" ${s.start_at_login ? 'checked' : ''} />Starta i systemfältet vid inloggning (byggd app)</label><div class="settings-info">Svenska · KB-Whisper large · CUDA · FP16<br>Arkiv och databas: <code>${esc(state.data_dir)}</code><br>Worker-logg: <code>${esc(state.data_dir)}/logs/worker.log</code></div><button type="submit" class="primary">Spara inställningar</button></form>`;
+  $('#settings-page').innerHTML = `<div class="page-heading"><div><div class="eyebrow">DIN DATOR, DINA ORD</div><h1>Inställningar</h1><p>Välj din lokala Pythonmiljö och KB-Whisper-modell.</p></div></div><form id="settings-form" class="settings-card settings-form"><h2>Transkribering</h2><p>Installera Pythonmiljön och hämta modellen enligt README innan du aktiverar transkribering.</p><label>Pythonprogrammets sökväg<input name="python_path" value="${esc(s.python_path)}" required spellcheck="false" /></label><label>Modellmapp<input name="model_path" value="${esc(s.model_path)}" required spellcheck="false" /><small>Mappen ska innehålla model.bin och modellens konfigurationsfiler.</small></label><label>Batchstorlek<select name="batch_size">${[1, 2, 4, 8, 16].map(n => `<option ${n === s.batch_size ? 'selected' : ''}>${n}</option>`).join('')}</select><small>Starta med 8. Vid minnesbrist försöker workern med mindre batcher i FP16.</small></label><label class="checkbox-label"><input type="checkbox" name="transcription_enabled" ${s.transcription_enabled ? 'checked' : ''} />Aktivera transkribering</label><label class="checkbox-label"><input type="checkbox" name="auto_import" ${s.auto_import ? 'checked' : ''} />Importera automatiskt från registrerad diktafon</label><label class="checkbox-label"><input type="checkbox" name="start_at_login" ${s.start_at_login ? 'checked' : ''} />Starta i systemfältet vid inloggning (byggd app)</label><div class="settings-info">Svenska · KB-Whisper large · CUDA · FP16<br>Arkiv och databas: <code>${esc(state.data_dir)}</code><br>Worker-logg: <code>${esc(state.data_dir)}/logs/worker.log</code></div><button type="submit" class="primary">Spara inställningar</button></form><section id="comfy-settings" class="settings-card settings-form"></section>`;
+  imagesView.showSettings();
   $('#settings-form').onsubmit = event => { event.preventDefault(); void action(async () => {
     const data = new FormData(event.target as HTMLFormElement);
     const settings: Settings = { python_path: String(data.get('python_path')).trim(), model_path: String(data.get('model_path')).trim(), batch_size: Number(data.get('batch_size')), transcription_enabled: data.has('transcription_enabled'), auto_import: data.has('auto_import'), start_at_login: data.has('start_at_login') };
@@ -249,12 +285,15 @@ function renderSettings() {
 function navigate(next: typeof page) {
   if (dirty && !window.confirm('Du har osparade rättningar. Lämna dem?')) return;
   if (page === 'library' && next !== page) { audioSource?.dispose(); audioSource = null; dirty = false; }
+  if (page === 'images' && next !== page) imagesView.hide();
+  if (page === 'library' && next !== page) selectionEvents?.abort();
   page = next;
-  for (const name of ['library', 'queue', 'devices', 'settings']) $(`#${name}-page`).classList.toggle('hidden', name !== page);
+  for (const name of ['library', 'queue', 'images', 'devices', 'settings']) $(`#${name}-page`).classList.toggle('hidden', name !== page);
   document.querySelectorAll<HTMLElement>('[data-page]').forEach(b => b.classList.toggle('active', b.dataset.page === page));
-  $('#page-label').textContent = { library: 'Inspelningar', queue: 'Arbetskö', devices: 'Diktafon', settings: 'Inställningar' }[page];
+  $('#page-label').textContent = { library: 'Inspelningar', queue: 'Arbetskö', images: 'Bilder', devices: 'Diktafon', settings: 'Inställningar' }[page];
   if (page === 'devices') renderDevices();
   if (page === 'queue') renderQueue();
+  if (page === 'images') imagesView.show();
   if (page === 'settings') renderSettings();
   if (page === 'library' && selected) void action(() => loadDetail(selected!));
 }

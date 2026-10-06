@@ -42,7 +42,7 @@ Modellhämtningen kräver internet och flera GB ledigt utrymme. Skriptet slår u
 
 I utvecklingsläge fylls sökvägarna automatiskt om projektets `.venv` och `models/kb-whisper-large` finns. Transkribering är fortfarande avstängd tills du aktiverar den.
 
-Workern kör offline och laddar inte ner modeller. Den håller modellen laddad och kör ett jobb åt gången med svenska, CUDA, FP16, VAD och ordtidsstämplar. Vid GPU-minnesbrist halveras batchstorleken ner till 1. Om en fil fortfarande misslyckas behålls den i arkivet med ett fel och kan köras om. En worker som inte kan startas tömmer inte arbetskön; åtgärda felet och stäng av/slå på transkribering. En paus träder i kraft efter den pågående inspelningen.
+Workern kör offline och laddar inte ner modeller. Den håller modellen laddad och kör ett jobb åt gången med svenska, CUDA, FP16, VAD och ordtidsstämplar. Vid GPU-minnesbrist halveras batchstorleken ner till 1. Om en fil fortfarande misslyckas behålls den i arkivet med ett fel och kan köras om. En worker som inte kan startas tömmer inte arbetskön; åtgärda felet och välj **Starta om motorn** under Arbetskö. En paus träder i kraft efter den pågående inspelningen.
 
 Installationsskriptet använder `worker/requirements-linux-py312.lock`, som låser de verifierade Pythonberoendena för Linux och Python 3.12. `worker/requirements.txt` beskriver beroendena för framtida uppdateringar. PyAV är låst till 17.1.0 eftersom faster-whisper 1.2.1 använder `metadata_errors`, som [PyAV 19 tog bort](https://github.com/PyAV-Org/PyAV/releases/tag/v19.0.0). Resultatens metadata innehåller den faktiska faster-whisper- och CTranslate2-versionen, modellrevisionen och batchstorleken.
 
@@ -70,6 +70,7 @@ appdatamapp/
   dreamwhisper.sqlite3-wal  # kan finnas medan appen körs
   dreamwhisper.sqlite3-shm
   exports/                  # TXT, Markdown, SRT
+  images/                   # lokalt bildarkiv, ordnat per bildjobb
   logs/worker.log           # Pythonfel och diagnostik
   app.lock                  # en instans per arkiv
 ```
@@ -84,6 +85,20 @@ Ljudspelaren läser arkivfilen via Tauri:s begränsade asset-protokoll och spela
 
 Säkerhetskopiera hela appdatamappen när appen är avslutad. Modellen och Pythonmiljön kan återskapas separat.
 
+## Skapa bilder med ComfyUI
+
+1. Starta din lokala ComfyUI separat, normalt på `http://127.0.0.1:8188`.
+2. Exportera ditt text-till-bild-workflow från ComfyUI i **API-format** (Export API / Save API Format). Vanligt visuellt workflow-JSON stöds inte.
+3. Under **Inställningar → ComfyUI – bildskapande**, testa anslutningen, importera JSON-filen och välj nodens textfält för positiv bildprompt. Spara bildinställningarna. Övriga workflow-värden, inklusive seed, negativa promptar, modellnamn och bildstorlek, behålls.
+4. Öppna en inspelning och fäll ut **Markera text för en bild**. Markera text över ett eller flera stycken och välj **Skapa bild av markering**.
+5. I **Bilder** kan du skriva om eller komplettera prompten innan du väljer **Skapa bild**. Du kan också börja med en helt egen prompt. Bildprompten ändrar aldrig transkriptet.
+
+Promptutkast sparas lokalt. Varje bildjobb sparar källtext, redigerad prompt, eventuell inspelning/transkriptversion och en egen workflow-kopia. Bildgalleriet visar alla PNG/JPEG/WebP-resultat som workflow rapporterar; använd SaveImage eller PreviewImage. Klicka på en bild för större visning. Bilderna kopieras till appens `images/`-mapp och kan visas efter omstart även om ComfyUI är avstängt. Databasen migreras automatiskt till version 2; äldre appversioner kan inte öppna den uppgraderade databasen.
+
+Whisper och bildjobben delar en supervisor: pågående transkribering slutförs, Whisper-processen avslutas och därefter skickas bildjobbet. När bildjobbet är avslutat väntar appen tills ComfyUI-kön är tom, begär modellavlastning via `/free` och låter Whisper återstarta om transkribering fortfarande är aktiverad. Avlastningen är asynkron; om Whisper inte kan återstarta visas felet i Arbetskö. En manuell paus respekteras. Samordningen förutsätter att andra program inte samtidigt skickar nya GPU-jobb till ComfyUI.
+
+Vid omstart eller nätverksfel följs redan skickade jobb upp via server-ID utan automatisk återsändning. **Följ upp / hämta igen** hämtar tidigare resultat utan ny bildkörning. Om servern inte längre går att nå kan **Avsluta uppföljning** användas efter att du kontrollerat att ComfyUI inte kör jobbet; detta avbryter inte jobbet i ComfyUI. Appen behöver en aktuell lokal ComfyUI som accepterar `prompt_id` i `/prompt` (den lokalt installerade serverkoden gör det). ComfyUI installeras eller startas inte av DreamWhisper. Ingen språkmodell eller automatisk översättning används.
+
 ## Testa och bygga
 
 ```bash
@@ -94,7 +109,7 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --no-default-features --offlin
 npm run tauri -- build
 ```
 
-Tester täcker hashverifiering, dubbletter, manifeståterhämtning, köåterställning, saknade arkivfiler, versionsbevarande, svenska sökningar, SRT-export, instanslås och workerprotokoll med batch-fallback. Pythonprotokolltesterna använder en simulerad talmodell; de verifierar inte verklig GPU-prestanda eller transkriptionskvalitet.
+Tester täcker hashverifiering, dubbletter, manifeståterhämtning, köåterställning, saknade arkivfiler, versionsbevarande, svenska sökningar, SRT-export, instanslås och workerprotokoll med batch-fallback. Bildtesterna täcker workflow-fältersättning, markerad text, beständiga utkast, API-fel, återhämtning utan dubbla jobb, flera bildresultat och GPU-överlämning med en simulerad Pythonprocess och lokal HTTP-testserver. Testerna behöver tillåtelse att öppna en lokal testport. Pythonprotokolltesterna använder en simulerad talmodell; de verifierar inte verklig GPU-prestanda eller transkriptionskvalitet.
 
 För en diagnostisk inventering via verklig UDisks2:
 
@@ -119,6 +134,8 @@ För att kontrollera GPU-kärnorna med syntetiskt ljud:
 - `src/`: TypeScriptgränssnitt, uppspelning och redigering.
 - `src-tauri/src/archive.rs`: säker kopiering och återhämtning.
 - `src-tauri/src/db.rs`: SQLite, beständig kö och transkriptversioner.
+- `src-tauri/src/images.rs`: beständiga bildjobb, ComfyUI-API och lokalt bildarkiv.
+- `src/images.ts`: prompteditor, workflow-inställningar och bildgalleri.
 - `src-tauri/src/devices.rs`: UDisks2 och enhetsidentifiering.
 - `src-tauri/src/service.rs`: bakgrundsimport och seriell arbetskö.
 - `src-tauri/src/worker.rs`: Pythonprocessens livscykel och JSON-protokoll.
