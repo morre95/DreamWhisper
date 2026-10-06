@@ -44,7 +44,7 @@ test('selected corrected text is persisted as an independent draft with its sour
   };
   const editor = view(); await editor.refresh();
   assert.equal(await editor.fromSelection('Rättad text med detaljer', 'recording', 'version'), true);
-  assert.deepEqual(writes[0], { prompt: 'Rättad text med detaljer', source_text: 'Rättad text med detaljer', recording_id: 'recording', run_id: 'version' });
+  assert.deepEqual(writes[0], { prompt: 'Rättad text med detaljer', negative_prompt: null, source_text: 'Rättad text med detaljer', recording_id: 'recording', run_id: 'version' });
   // No save_segment call, and a later polling snapshot cannot overwrite the draft.
   await editor.refresh(); await editor.persist(); assert.equal(writes.length, 1);
 });

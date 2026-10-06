@@ -1,16 +1,17 @@
 import { invoke, convertFileSrc, isTauri } from '@tauri-apps/api/core';
 
+export interface PromptField { node_id: string; input_name: string }
 export interface ComfySettings {
   url: string; workflow: Record<string, { class_type: string; inputs: Record<string, unknown>; _meta?: { title?: string } }>;
-  workflow_name: string; node_id: string; input_name: string;
+  workflow_name: string; node_id: string; input_name: string; negative_field: PromptField | null;
   selected_workflow_id: string | null; comfy_directory: string; comfy_python_path: string;
 }
-export interface ImageDraft { prompt: string; source_text: string; recording_id: string | null; run_id: string | null }
+export interface ImageDraft { prompt: string; negative_prompt: string | null; source_text: string; recording_id: string | null; run_id: string | null }
 export interface GeneratedImage { path: string; node_id: string; filename: string; subfolder: string; image_type: string }
 export interface ImageJob { id: string; created_at: string; draft: ImageDraft; config: ComfySettings; status: string; prompt_id: string | null; error: string | null; images: GeneratedImage[]; release_pending: boolean }
-export interface SavedWorkflow { id: string; name: string; workflow: ComfySettings['workflow']; node_id: string; input_name: string }
+export interface SavedWorkflow { id: string; name: string; workflow: ComfySettings['workflow']; node_id: string; input_name: string; negative_field: PromptField | null }
 interface ImageSnapshot { workflows: SavedWorkflow[]; settings: ComfySettings; draft: ImageDraft; jobs: ImageJob[] }
-export const emptyDraft = (): ImageDraft => ({ prompt: '', source_text: '', recording_id: null, run_id: null });
+export const emptyDraft = (): ImageDraft => ({ prompt: '', negative_prompt: null, source_text: '', recording_id: null, run_id: null });
 export const escapeHtml = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 export function workflowFields(workflow: unknown): { node: string; input: string; title: string }[] {
   if (!workflow || typeof workflow !== 'object' || Array.isArray(workflow)) throw new Error('Workflow måste vara ett JSON-objekt i API-format.');
@@ -45,11 +46,12 @@ export class ImagesView {
     if (!isTauri()) return;
     const version = this.draftVersion;
     const snapshot = await invoke<ImageSnapshot>('image_snapshot');
-    if (!this.snapshot && version === this.draftVersion) this.draft = snapshot.draft;
+    if (!this.snapshot && version === this.draftVersion) this.draft = { ...emptyDraft(), ...snapshot.draft };
     this.snapshot = snapshot;
     if (this.visible) {
       if (!this.container.querySelector('#image-prompt')) this.render();
       this.renderWorkflows();
+      this.updateNegativePrompt();
       this.renderJobs();
       this.updateCreateButton();
     }
@@ -59,8 +61,8 @@ export class ImagesView {
   hide() { this.visible = false; void this.persist().catch(e => this.notify(String(e), true)); }
   async fromSelection(text: string, recordingId: string, runId: string | null): Promise<boolean> {
     if (!this.snapshot) await this.refresh();
-    if (this.draft.prompt.trim() && !window.confirm('Ersätta det befintliga bildutkastet med den markerade texten?')) return false;
-    this.draft = { prompt: text, source_text: text, recording_id: recordingId, run_id: runId };
+    if ((this.draft.prompt.trim() || this.draft.negative_prompt?.trim()) && !window.confirm('Ersätta det befintliga bildutkastet med den markerade texten?')) return false;
+    this.draft = { prompt: text, negative_prompt: null, source_text: text, recording_id: recordingId, run_id: runId };
     this.draftVersion++;
     await this.persist();
     return true;
@@ -85,21 +87,37 @@ export class ImagesView {
     const esc = this.esc;
     this.container.innerHTML = `<div class="page-heading"><div><div class="eyebrow">FRÅN ORD TILL BILD</div><h1>Bilder</h1><p>Markera text i ett transkript eller skriv en egen bildprompt.</p></div></div>
       <section id="workflow-library" class="settings-card workflow-library"></section>
-      <div class="settings-card image-editor"><label for="image-prompt">Bildprompt</label><textarea id="image-prompt" rows="7" placeholder="Beskriv bilden du vill skapa…">${esc(this.draft.prompt)}</textarea>
+      <div class="settings-card image-editor"><label for="image-prompt">Positiv prompt</label><textarea id="image-prompt" rows="7" placeholder="Beskriv bilden du vill skapa…">${esc(this.draft.prompt)}</textarea>
+      <label for="image-negative-prompt" class="negative-prompt-label">Negativ prompt</label><textarea id="image-negative-prompt" rows="3" placeholder="Beskriv det du vill undvika i bilden…"></textarea><small id="negative-prompt-hint" class="muted"></small>
       <p id="image-source" class="muted">${this.draft.recording_id ? 'Utkast från ett transkript. Ändringar här påverkar inte transkriptet.' : 'Fristående bildprompt.'}</p>
       <div class="device-actions"><button id="generate-image" class="primary">Skapa bild</button><button id="clear-image-draft" class="secondary">Nytt utkast</button></div>
       <p class="muted">Whisper lämnar plats åt bildskapandet på GPU:n. ComfyUI kan startas under Inställningar.</p></div>
       <div id="image-jobs" aria-live="polite"></div>`;
     const input = this.container.querySelector<HTMLTextAreaElement>('#image-prompt')!;
     input.oninput = () => { this.draft.prompt = input.value; this.change(); this.updateCreateButton(); };
+    this.container.querySelector<HTMLTextAreaElement>('#image-negative-prompt')!.oninput = event => {
+      this.draft.negative_prompt = (event.target as HTMLTextAreaElement).value; this.change();
+    };
     this.container.querySelector<HTMLButtonElement>('#generate-image')!.onclick = () => void this.create();
     this.container.querySelector<HTMLButtonElement>('#clear-image-draft')!.onclick = () => {
-      if (this.draft.prompt.trim() && !window.confirm('Rensa bildutkastet? Sparade bilder finns kvar.')) return;
+      if ((this.draft.prompt.trim() || this.draft.negative_prompt?.trim()) && !window.confirm('Rensa bildutkastet? Sparade bilder finns kvar.')) return;
       this.draft = emptyDraft(); this.change(); this.render();
     };
     this.renderWorkflows();
+    this.updateNegativePrompt();
     this.updateCreateButton();
     this.renderJobs();
+  }
+  private updateNegativePrompt() {
+    const input = this.container.querySelector<HTMLTextAreaElement>('#image-negative-prompt');
+    if (!input) return;
+    const workflow = this.snapshot?.workflows?.find(w => w.id === this.snapshot?.settings.selected_workflow_id);
+    const mapping = workflow?.negative_field;
+    input.disabled = !mapping;
+    const original = mapping ? workflow?.workflow[mapping.node_id]?.inputs[mapping.input_name] : '';
+    const value = this.draft.negative_prompt ?? (typeof original === 'string' ? original : '');
+    if (input.value !== value) input.value = value;
+    this.container.querySelector<HTMLElement>('#negative-prompt-hint')!.textContent = mapping ? 'Förifyllt från flödet tills du ändrar det. Töm fältet om du vill använda en tom negativ prompt.' : 'Välj ett negativt promptfält via Ändra namn / promptfält för detta flöde.';
   }
   private updateCreateButton() {
     const button = this.container.querySelector<HTMLButtonElement>('#generate-image');
@@ -124,7 +142,7 @@ export class ImagesView {
     const html = jobs.length ? jobs.map(job => `<article class="settings-card image-job"><div class="image-job-head"><h2>${esc(new Date(job.created_at).toLocaleString('sv-SE'))}</h2><span class="status ${job.status === 'completed' ? 'completed' : job.status === 'failed' || job.status === 'uncertain' ? 'failed' : 'queued'}">${esc(statuses[job.status] ?? job.status)}</span></div>
       ${job.release_pending && ['completed', 'failed', 'uncertain'].includes(job.status) ? '<p class="muted">Väntar på ledig ComfyUI-kö och frigör GPU-minnet innan Whisper återstartas.</p>' : ''}
       ${job.error ? `<p class="inline-error">${esc(job.error)}</p>` : ''}
-      <details><summary>Bildprompt och workflow</summary><p class="image-prompt-preview">${esc(job.draft.prompt)}</p><small>${esc(job.config.workflow_name)}</small></details>
+      <details><summary>Bildprompt och workflow</summary><p class="image-prompt-preview">${esc(job.draft.prompt)}</p>${job.draft.negative_prompt != null ? `<b>Negativ prompt</b><p class="image-prompt-preview">${esc(job.draft.negative_prompt) || '(tom)'}</p>` : ''}<small>${esc(job.config.workflow_name)}</small></details>
       <div class="image-gallery">${job.images.map(image => `<a href="${esc(convertFileSrc(image.path))}" target="_blank" rel="noopener" data-image-preview="${esc(image.path)}"><img src="${esc(convertFileSrc(image.path))}" loading="lazy" alt="Bild skapad från den sparade bildprompten" /></a>`).join('')}</div>
       <div class="device-actions"><button class="secondary small" data-reuse-image="${esc(job.id)}">Använd prompt igen</button>${job.draft.recording_id ? `<button class="secondary small" data-image-source="${esc(job.id)}">Öppna inspelningen</button>` : ''}${job.prompt_id && ['failed', 'uncertain'].includes(job.status) && !job.release_pending ? `<button class="secondary small" data-follow-image="${esc(job.id)}">Följ upp / hämta igen</button>` : ''}${job.release_pending && job.error ? `<button class="secondary small" data-dismiss-image="${esc(job.id)}">Avsluta uppföljning</button>` : ''}</div>
       </article>`).join('') : '<div class="settings-card"><p class="muted">Här visas bildjobben och dina sparade bilder.</p></div>';
@@ -133,8 +151,8 @@ export class ImagesView {
     target.dataset.rendered = html; target.innerHTML = html;
     target.querySelectorAll<HTMLButtonElement>('[data-reuse-image]').forEach(button => button.onclick = () => {
       const job = jobs.find(j => j.id === button.dataset.reuseImage)!;
-      if (this.draft.prompt.trim() && !window.confirm('Ersätta bildutkastet med denna prompt?')) return;
-      this.draft = { ...job.draft }; this.change(); this.render();
+      if ((this.draft.prompt.trim() || this.draft.negative_prompt?.trim()) && !window.confirm('Ersätta bildutkastet med denna prompt?')) return;
+      this.draft = { ...emptyDraft(), ...job.draft }; this.change(); this.render();
     });
     target.querySelectorAll<HTMLButtonElement>('[data-image-source]').forEach(button => button.onclick = () => {
       const job = jobs.find(j => j.id === button.dataset.imageSource)!;
@@ -183,10 +201,11 @@ export class ImagesView {
     let workflow = existing ? structuredClone(existing.workflow) : null;
     const dialog = document.createElement('dialog');
     dialog.className = 'workflow-dialog';
-    dialog.innerHTML = `<form class="workflow-form"><h2>${existing ? 'Ändra sparat flöde' : 'Lägg till ComfyUI-flöde'}</h2><label>Namn<input id="workflow-name" maxlength="120" required value="${this.esc(existing?.name ?? '')}" placeholder="Exempel: Foto, illustration eller landskap" /></label><label>JSON i API-format<input id="workflow-file" type="file" accept=".json,application/json" ${existing ? '' : 'required'} /></label><small>Exportera i API-format från ComfyUI. ${existing ? 'Välj en ny fil om du vill ersätta detta flöde.' : ''}</small><label>Textfält för bildprompten<select id="workflow-input" required></select></label><div class="dialog-actions"><button type="button" class="secondary" id="workflow-cancel">Avbryt</button><button type="submit" class="primary">Spara flöde</button></div></form>`;
+    dialog.innerHTML = `<form class="workflow-form"><h2>${existing ? 'Ändra sparat flöde' : 'Lägg till ComfyUI-flöde'}</h2><label>Namn<input id="workflow-name" maxlength="120" required value="${this.esc(existing?.name ?? '')}" placeholder="Exempel: Foto, illustration eller landskap" /></label><label>JSON i API-format<input id="workflow-file" type="file" accept=".json,application/json" ${existing ? '' : 'required'} /></label><small>Exportera i API-format från ComfyUI. ${existing ? 'Välj en ny fil om du vill ersätta detta flöde.' : ''}</small><label>Textfält för positiv prompt<select id="workflow-input" required></select></label><label>Textfält för negativ prompt (valfritt)<select id="workflow-negative-input"></select></label><div class="dialog-actions"><button type="button" class="secondary" id="workflow-cancel">Avbryt</button><button type="submit" class="primary">Spara flöde</button></div></form>`;
     const fields = () => {
       const select = dialog.querySelector<HTMLSelectElement>('#workflow-input')!;
       select.innerHTML = '<option value="">Välj promptfält…</option>' + (workflow ? workflowFields(workflow) : []).map(f => `<option value="${this.esc(JSON.stringify({ node: f.node, input: f.input }))}" ${existing && f.node === existing.node_id && f.input === existing.input_name ? 'selected' : ''}>${this.esc(f.title)}</option>`).join('');
+      dialog.querySelector<HTMLSelectElement>('#workflow-negative-input')!.innerHTML = '<option value="">Ingen negativ prompt – behåll flödets inställningar</option>' + (workflow ? workflowFields(workflow) : []).map(f => `<option value="${this.esc(JSON.stringify({ node: f.node, input: f.input }))}" ${existing?.negative_field && f.node === existing.negative_field.node_id && f.input === existing.negative_field.input_name ? 'selected' : ''}>${this.esc(f.title)}</option>`).join('');
     };
     fields();
     dialog.querySelector<HTMLInputElement>('#workflow-file')!.onchange = event => void (async () => {
@@ -207,8 +226,10 @@ export class ImagesView {
       const button = dialog.querySelector<HTMLButtonElement>('button[type=submit]')!; button.disabled = true;
       try {
         const field = JSON.parse(dialog.querySelector<HTMLSelectElement>('#workflow-input')!.value || 'null');
-        if (!workflow || !field) throw new Error('Importera API-JSON och välj promptfält.');
-        await invoke('save_workflow', { workflow: { id: existing?.id ?? '', name: dialog.querySelector<HTMLInputElement>('#workflow-name')!.value.trim(), workflow, node_id: field.node, input_name: field.input } });
+        const negative = JSON.parse(dialog.querySelector<HTMLSelectElement>('#workflow-negative-input')!.value || 'null');
+        if (!workflow || !field) throw new Error('Importera API-JSON och välj positivt promptfält.');
+        if (negative && negative.node === field.node && negative.input === field.input) throw new Error('Positiv och negativ prompt måste använda olika textfält.');
+        await invoke('save_workflow', { workflow: { id: existing?.id ?? '', name: dialog.querySelector<HTMLInputElement>('#workflow-name')!.value.trim(), workflow, node_id: field.node, input_name: field.input, negative_field: negative ? { node_id: negative.node, input_name: negative.input } : null } });
         dialog.close(); await this.refresh(); this.notify('Flödet är sparat och valt för nästa bild.');
       } catch (e) { this.notify(String(e), true); button.disabled = false; }
     })(); };

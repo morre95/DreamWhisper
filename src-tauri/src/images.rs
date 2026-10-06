@@ -20,6 +20,8 @@ pub struct ComfySettings {
     pub node_id: String,
     pub input_name: String,
     #[serde(default)]
+    pub negative_field: Option<PromptField>,
+    #[serde(default)]
     pub selected_workflow_id: Option<String>,
     #[serde(default = "default_comfy_directory")]
     pub comfy_directory: String,
@@ -34,6 +36,7 @@ impl Default for ComfySettings {
             workflow_name: String::new(),
             node_id: String::new(),
             input_name: String::new(),
+            negative_field: None,
             selected_workflow_id: None,
             comfy_directory: default_comfy_directory(),
             comfy_python_path: default_comfy_python(),
@@ -60,12 +63,19 @@ fn default_comfy_python() -> String {
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PromptField {
+    pub node_id: String,
+    pub input_name: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SavedWorkflow {
     pub id: String,
     pub name: String,
     pub workflow: Value,
     pub node_id: String,
     pub input_name: String,
+    #[serde(default)]
+    pub negative_field: Option<PromptField>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ComfyConnection {
@@ -76,6 +86,8 @@ pub struct ComfyConnection {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ImageDraft {
     pub prompt: String,
+    #[serde(default)]
+    pub negative_prompt: Option<String>,
     pub source_text: String,
     pub recording_id: Option<String>,
     pub run_id: Option<String>,
@@ -148,6 +160,7 @@ impl Database {
             workflow: workflow.workflow.clone(),
             node_id: workflow.node_id.clone(),
             input_name: workflow.input_name.clone(),
+            negative_field: workflow.negative_field.clone(),
             ..Default::default()
         };
         build_prompt(&config, "test")?;
@@ -190,6 +203,7 @@ impl Database {
             workflow: config.workflow.clone(),
             node_id: config.node_id.clone(),
             input_name: config.input_name.clone(),
+            negative_field: config.negative_field.clone(),
         };
         let mut c = self.connect()?;
         let tx = c.transaction()?;
@@ -239,7 +253,7 @@ impl Database {
     }
     pub fn enqueue_image_with_workflow(
         &self,
-        draft: ImageDraft,
+        mut draft: ImageDraft,
         workflow_id: Option<&str>,
     ) -> Result<String> {
         if draft.prompt.trim().is_empty() {
@@ -247,6 +261,13 @@ impl Database {
         }
         if draft.prompt.len() > 100_000 {
             bail!("Bildprompten är för lång (max 100 000 byte).");
+        }
+        if draft
+            .negative_prompt
+            .as_ref()
+            .is_some_and(|text| text.len() > 100_000)
+        {
+            bail!("Negativ prompt är för lång (max 100 000 byte).");
         }
         let mut config = self.comfy_settings()?;
         validate_url(&config.url)?;
@@ -261,8 +282,19 @@ impl Database {
             config.workflow_name = workflow.name;
             config.node_id = workflow.node_id;
             config.input_name = workflow.input_name;
+            config.negative_field = workflow.negative_field;
         }
-        config.workflow = build_prompt(&config, &draft.prompt)?;
+        config.workflow =
+            build_prompt_with_negative(&config, &draft.prompt, draft.negative_prompt.as_deref())?;
+        draft.negative_prompt = config.negative_field.as_ref().and_then(|field| {
+            config
+                .workflow
+                .get(&field.node_id)?
+                .get("inputs")?
+                .get(&field.input_name)?
+                .as_str()
+                .map(str::to_owned)
+        });
         // Resolve source references before committing a durable job.
         if let Some(id) = &draft.recording_id {
             let exists: bool = self.connect()?.query_row(
@@ -380,19 +412,43 @@ pub fn validate_workflow(workflow: &Value) -> Result<()> {
     Ok(())
 }
 pub fn build_prompt(config: &ComfySettings, text: &str) -> Result<Value> {
+    build_prompt_with_negative(config, text, None)
+}
+pub fn build_prompt_with_negative(
+    config: &ComfySettings,
+    text: &str,
+    negative: Option<&str>,
+) -> Result<Value> {
     validate_workflow(&config.workflow)?;
     let mut workflow = config.workflow.clone();
     let field = workflow
         .get_mut(&config.node_id)
         .and_then(|n| n.get_mut("inputs"))
         .and_then(|n| n.get_mut(&config.input_name))
-        .context("Välj nod och textfält för bildprompten.")?;
+        .context("Välj nod och textfält för positiv prompt.")?;
     if !field.is_string() {
-        bail!("Det valda promptfältet måste innehålla text, inte en nodkoppling.");
+        bail!("Det positiva promptfältet måste innehålla text, inte en nodkoppling.");
     }
     *field = Value::String(text.into());
+    if let Some(mapping) = &config.negative_field {
+        if mapping.node_id == config.node_id && mapping.input_name == config.input_name {
+            bail!("Positiv och negativ prompt måste använda olika textfält.");
+        }
+        let field = workflow
+            .get_mut(&mapping.node_id)
+            .and_then(|n| n.get_mut("inputs"))
+            .and_then(|n| n.get_mut(&mapping.input_name))
+            .context("Det negativa promptfältet finns inte i flödet.")?;
+        if !field.is_string() {
+            bail!("Det negativa promptfältet måste innehålla text, inte en nodkoppling.");
+        }
+        if let Some(text) = negative {
+            *field = Value::String(text.into());
+        }
+    }
     Ok(workflow)
 }
+
 fn client() -> Result<Client> {
     Ok(Client::builder()
         .no_proxy()
@@ -869,6 +925,7 @@ for line in sys.stdin:
             workflow: original.workflow.clone(),
             node_id: "6".into(),
             input_name: "text".into(),
+            negative_field: None,
         })?;
         let mut second_json = original.workflow.clone();
         second_json["3"]["inputs"]["steps"] = json!(50);
@@ -878,6 +935,7 @@ for line in sys.stdin:
             workflow: second_json,
             node_id: "6".into(),
             input_name: "text".into(),
+            negative_field: None,
         })?;
         db.select_workflow(&first)?;
         let first_job = db.enqueue_image_with_workflow(
@@ -923,6 +981,96 @@ for line in sys.stdin:
             20
         );
         assert!(reopened.select_workflow("missing").is_err());
+        Ok(())
+    }
+    #[test]
+    fn positive_and_negative_prompts_are_independent_durable_and_allow_explicit_empty() -> Result<()>
+    {
+        let temp = tempfile::tempdir()?;
+        let db = Database::open(temp.path())?;
+        let config = config();
+        let id = db.save_workflow(SavedWorkflow {
+            id: String::new(),
+            name: "Två promptar".into(),
+            workflow: config.workflow.clone(),
+            node_id: "6".into(),
+            input_name: "text".into(),
+            negative_field: Some(PromptField {
+                node_id: "7".into(),
+                input_name: "text".into(),
+            }),
+        })?;
+        let draft = ImageDraft {
+            prompt: "en skog".into(),
+            negative_prompt: Some("suddigt, vattenstämpel".into()),
+            ..Default::default()
+        };
+        db.save_image_draft(&draft)?;
+        db.enqueue_image_with_workflow(draft, Some(&id))?;
+        let reopened = Database::open(temp.path())?;
+        assert_eq!(
+            reopened.image_draft()?.negative_prompt.as_deref(),
+            Some("suddigt, vattenstämpel")
+        );
+        let job = reopened.image_jobs()?[0].clone();
+        assert_eq!(job.config.workflow["6"]["inputs"]["text"], "en skog");
+        assert_eq!(
+            job.config.workflow["7"]["inputs"]["text"],
+            "suddigt, vattenstämpel"
+        );
+        assert_eq!(job.config.workflow["3"], config.workflow["3"]);
+        assert_eq!(
+            job.draft.negative_prompt.as_deref(),
+            Some("suddigt, vattenstämpel")
+        );
+        assert_eq!(
+            reopened.saved_workflows()?[0].workflow["7"]["inputs"]["text"],
+            "negative"
+        );
+        reopened.enqueue_image(ImageDraft {
+            prompt: "ny bild".into(),
+            ..Default::default()
+        })?;
+        assert_eq!(
+            reopened.image_jobs()?[0].config.workflow["7"]["inputs"]["text"],
+            "negative"
+        );
+        reopened.enqueue_image(ImageDraft {
+            prompt: "ny bild".into(),
+            negative_prompt: Some(String::new()),
+            ..Default::default()
+        })?;
+        assert_eq!(
+            reopened.image_jobs()?[0].config.workflow["7"]["inputs"]["text"],
+            ""
+        );
+        let mut invalid = reopened.saved_workflows()?[0].clone();
+        invalid.negative_field = Some(PromptField {
+            node_id: "6".into(),
+            input_name: "text".into(),
+        });
+        assert!(reopened.save_workflow(invalid.clone()).is_err());
+        invalid.negative_field = Some(PromptField {
+            node_id: "6".into(),
+            input_name: "clip".into(),
+        });
+        assert!(reopened.save_workflow(invalid.clone()).is_err());
+        invalid.negative_field = Some(PromptField {
+            node_id: "missing".into(),
+            input_name: "text".into(),
+        });
+        assert!(reopened.save_workflow(invalid).is_err());
+        Ok(())
+    }
+    #[test]
+    fn older_json_defaults_to_no_negative_prompt_mapping() -> Result<()> {
+        let old = json!({"id":"old","name":"Tidigare","workflow":config().workflow,"node_id":"6","input_name":"text"});
+        let workflow: SavedWorkflow = serde_json::from_value(old)?;
+        assert!(workflow.negative_field.is_none());
+        let draft: ImageDraft = serde_json::from_value(
+            json!({"prompt":"positiv","source_text":"","recording_id":null,"run_id":null}),
+        )?;
+        assert!(draft.negative_prompt.is_none());
         Ok(())
     }
     #[test]
