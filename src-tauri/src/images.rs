@@ -173,6 +173,32 @@ impl Database {
         self.select_workflow(&workflow.id)?;
         Ok(workflow.id)
     }
+    pub fn delete_workflow(&self, id: &str) -> Result<()> {
+        let mut c = self.connect()?;
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if tx.execute("DELETE FROM image_workflows WHERE id=?1", [id])? == 0 {
+            bail!("Flödet finns inte längre.");
+        }
+        let json: Option<String> = tx
+            .query_row("SELECT json FROM image_config WHERE id=1", [], |r| r.get(0))
+            .optional()?;
+        let mut config: ComfySettings = json
+            .map(|s| serde_json::from_str(&s))
+            .transpose()?
+            .unwrap_or_default();
+        if config.selected_workflow_id.as_deref() == Some(id) {
+            config.selected_workflow_id = None;
+            // Do not fall back to the old singleton workflow after removing it.
+            config.workflow = json!({});
+            config.workflow_name.clear();
+            config.node_id.clear();
+            config.input_name.clear();
+            config.negative_field = None;
+            tx.execute("INSERT INTO image_config VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET json=excluded.json", [serde_json::to_string(&config)?])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
     pub fn select_workflow(&self, id: &str) -> Result<()> {
         if !self.saved_workflows()?.iter().any(|w| w.id == id) {
             bail!("Flödet saknas.");
@@ -1060,6 +1086,68 @@ for line in sys.stdin:
             input_name: "text".into(),
         });
         assert!(reopened.save_workflow(invalid).is_err());
+        Ok(())
+    }
+    #[test]
+    fn deleting_workflows_preserves_jobs_and_clears_only_the_deleted_selection() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let db = Database::open(temp.path())?;
+        let config = config();
+        let first = db.save_workflow(SavedWorkflow {
+            id: String::new(),
+            name: "Första".into(),
+            workflow: config.workflow.clone(),
+            node_id: "6".into(),
+            input_name: "text".into(),
+            negative_field: None,
+        })?;
+        let second = db.save_workflow(SavedWorkflow {
+            id: String::new(),
+            name: "Andra".into(),
+            workflow: config.workflow,
+            node_id: "6".into(),
+            input_name: "text".into(),
+            negative_field: None,
+        })?;
+        db.enqueue_image_with_workflow(
+            ImageDraft {
+                prompt: "sparat bildjobb".into(),
+                ..Default::default()
+            },
+            Some(&first),
+        )?;
+        db.delete_workflow(&first)?;
+        assert_eq!(
+            db.comfy_settings()?.selected_workflow_id.as_deref(),
+            Some(second.as_str())
+        );
+        assert_eq!(db.image_jobs()?[0].config.workflow_name, "Första");
+        assert_eq!(
+            db.image_jobs()?[0].config.workflow["6"]["inputs"]["text"],
+            "sparat bildjobb"
+        );
+        assert!(db
+            .enqueue_image_with_workflow(
+                ImageDraft {
+                    prompt: "ny bild".into(),
+                    ..Default::default()
+                },
+                Some(&first)
+            )
+            .is_err());
+        db.delete_workflow(&second)?;
+        let reopened = Database::open(temp.path())?;
+        assert!(reopened.saved_workflows()?.is_empty());
+        assert!(reopened.comfy_settings()?.selected_workflow_id.is_none());
+        assert!(reopened
+            .enqueue_image(ImageDraft {
+                prompt: "ny bild".into(),
+                ..Default::default()
+            })
+            .is_err());
+        assert_eq!(reopened.image_jobs()?.len(), 1);
+        assert!(reopened.delete_workflow(&first).is_err());
+        assert_eq!(reopened.comfy_settings()?.url, "http://127.0.0.1:8188");
         Ok(())
     }
     #[test]

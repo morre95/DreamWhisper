@@ -29,6 +29,10 @@ fn save_workflow(
     state.db.save_workflow(workflow).map_err(err)
 }
 #[tauri::command]
+fn delete_workflow(state: State<'_, AppState>, id: String) -> ApiResult<()> {
+    state.db.delete_workflow(&id).map_err(err)
+}
+#[tauri::command]
 fn select_workflow(state: State<'_, AppState>, id: String) -> ApiResult<()> {
     state.db.select_workflow(&id).map_err(err)
 }
@@ -269,6 +273,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             save_workflow,
             select_workflow,
+            delete_workflow,
             save_comfy_connection,
             comfy_server_status,
             start_comfy_server,

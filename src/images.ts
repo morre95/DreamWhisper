@@ -55,6 +55,7 @@ export class ImagesView {
       this.renderJobs();
       this.updateCreateButton();
     }
+    this.renderSavedWorkflowSettings();
     await this.refreshServerStatus();
   }
   show() { this.visible = true; this.render(); }
@@ -238,7 +239,7 @@ export class ImagesView {
   showSettings() {
     const container = this.configContainer(); if (!container) return;
     const settings = this.snapshot?.settings;
-    container.innerHTML = `<h2>ComfyUI – server</h2><p>Dina bildflöden importeras och väljs under Bilder.</p><label>ComfyUI-adress<input id="comfy-url" value="${this.esc(settings?.url ?? 'http://127.0.0.1:8188')}" spellcheck="false" /></label><label>ComfyUI-mapp<input id="comfy-directory" value="${this.esc(settings?.comfy_directory)}" placeholder="/home/ditt-namn/comfy/ComfyUI" spellcheck="false" /></label><label>ComfyUI:s Pythonprogram<input id="comfy-python" value="${this.esc(settings?.comfy_python_path)}" placeholder="/home/ditt-namn/comfy/ComfyUI/.venv/bin/python" spellcheck="false" /></label><div class="device-actions"><button id="comfy-start" class="primary">Starta ComfyUI-server</button><button id="comfy-test" class="secondary">Testa anslutning</button><button id="comfy-save" class="secondary">Spara serverinställningar</button></div><p id="comfy-server-status" role="status" class="muted"></p><small>Servern startas lokalt utan att öppna webbläsaren. En server startad av DreamWhisper avslutas när du väljer Avsluta i systemfältet. En server du startat separat återanvänds.</small>`;
+    container.innerHTML = `<h2>ComfyUI – server</h2><p>Dina bildflöden importeras och väljs under Bilder.</p><label>ComfyUI-adress<input id="comfy-url" value="${this.esc(settings?.url ?? 'http://127.0.0.1:8188')}" spellcheck="false" /></label><label>ComfyUI-mapp<input id="comfy-directory" value="${this.esc(settings?.comfy_directory)}" placeholder="/home/ditt-namn/comfy/ComfyUI" spellcheck="false" /></label><label>ComfyUI:s Pythonprogram<input id="comfy-python" value="${this.esc(settings?.comfy_python_path)}" placeholder="/home/ditt-namn/comfy/ComfyUI/.venv/bin/python" spellcheck="false" /></label><div class="device-actions"><button id="comfy-start" class="primary">Starta ComfyUI-server</button><button id="comfy-test" class="secondary">Testa anslutning</button><button id="comfy-save" class="secondary">Spara serverinställningar</button></div><p id="comfy-server-status" role="status" class="muted"></p><small>Servern startas lokalt utan att öppna webbläsaren. En server startad av DreamWhisper avslutas när du väljer Avsluta i systemfältet. En server du startat separat återanvänds.</small><div id="saved-workflow-settings"></div>`;
     const connection = () => ({ url: container.querySelector<HTMLInputElement>('#comfy-url')!.value.trim(), comfy_directory: container.querySelector<HTMLInputElement>('#comfy-directory')!.value.trim(), comfy_python_path: container.querySelector<HTMLInputElement>('#comfy-python')!.value.trim() });
     container.querySelector<HTMLButtonElement>('#comfy-save')!.onclick = () => void (async () => {
       try { await invoke('save_comfy_connection', { settings: connection() }); await this.refresh(); this.notify('Serverinställningar sparade.'); }
@@ -256,7 +257,25 @@ export class ImagesView {
       try { await invoke('test_comfy_connection', { url: connection().url }); this.notify('Anslutningen till ComfyUI fungerar.'); }
       catch (e) { this.notify(String(e), true); } finally { button.disabled = false; }
     })();
+    this.renderSavedWorkflowSettings();
     void this.refreshServerStatus();
+  }
+  private renderSavedWorkflowSettings() {
+    const target = this.configContainer()?.querySelector<HTMLElement>('#saved-workflow-settings');
+    if (!target) return;
+    const workflows = this.snapshot?.workflows ?? [];
+    const selected = this.snapshot?.settings.selected_workflow_id;
+    const signature = JSON.stringify([workflows.map(w => [w.id, w.name]), selected]);
+    if (target.dataset.rendered === signature) return;
+    target.dataset.rendered = signature;
+    target.innerHTML = `<h3>Sparade bildflöden</h3><p>Ta bort flöden du inte längre vill använda. Bildhistorik, köade jobb och sparade bilder behålls.</p>${workflows.length ? workflows.map(w => `<div class="workflow-settings-row"><div><b>${this.esc(w.name)}</b>${w.id === selected ? '<small>Valt för nästa bild</small>' : ''}</div><button type="button" class="secondary small" data-delete-workflow="${this.esc(w.id)}">Ta bort</button></div>`).join('') : '<p class="muted">Inga sparade flöden. Lägg till ett flöde under Bilder.</p>'}`;
+    target.querySelectorAll<HTMLButtonElement>('[data-delete-workflow]').forEach(button => button.onclick = () => void (async () => {
+      const workflow = workflows.find(w => w.id === button.dataset.deleteWorkflow)!;
+      if (!window.confirm(`Ta bort flödet ”${workflow.name}”? Tidigare bilder och bildjobb finns kvar.${workflow.id === selected ? ' Välj ett annat flöde under Bilder innan du skapar nästa bild.' : ''}`)) return;
+      button.disabled = true;
+      try { await invoke('delete_workflow', { id: workflow.id }); await this.refresh(); this.notify('Flödet har tagits bort.'); }
+      catch (e) { this.notify(String(e), true); button.disabled = false; }
+    })());
   }
   private async refreshServerStatus() {
     const container = this.configContainer();

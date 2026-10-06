@@ -148,3 +148,5 @@ Verifierat på denna dator: desktopbygge, TypeScriptbygge, Clippy, 13 automatisk
 Återstår för validering: fysisk Sony-anslutning, dess volymidentifierare, svenska talinspelningar, ordtidsstämplarnas kvalitet och visuell kontroll av native-gränssnittet. Ingen diktafon eller automatiserbar GUI-session fanns tillgänglig under implementationen. Nästa förbättringar är grafisk mappväljare, valbar arkivplats och exaktare inspelningsdatum från Sony-filnamn.
 
 Arbetskö visar pågående och väntande inspelningar i behandlingsordning samt misslyckade jobb med felorsak. Välj **Starta kön** för att aktivera transkribering; **Pausa kön** stoppar efter pågående inspelning. Försök igen köar om filen och bevarar tidigare transkript, men aktiverar inte en pausad kö. Vid fel när modellen laddas kan du korrigera inställningarna och välja **Starta om motorn**.
+
+Under **Inställningar → Sparade bildflöden** kan du ta bort flöden. Bildhistorik, sparade bilder och redan köade jobb behåller sina workflow-kopior. Om det valda flödet tas bort behöver du välja ett annat under Bilder innan nästa bild skapas.
