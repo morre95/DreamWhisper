@@ -18,7 +18,7 @@ let activeRun: string | null = null;
 let loaded: Transcript | null = null;
 let audioSource: ArchiveAudio | null = null;
 let selectionEvents: AbortController | null = null;
-let page: 'library' | 'queue' | 'images' | 'devices' | 'settings' = 'library';
+let page: 'library' | 'queue' | 'images' | 'gallery' | 'devices' | 'settings' = 'library';
 let filter = '';
 let loadSequence = 0;
 let dirty = false;
@@ -39,6 +39,7 @@ app.innerHTML = `
       <button data-page="library" class="nav active">${icons.library}Inspelningar<span id="count">0</span></button>
       <button data-page="queue" class="nav">${icons.wave}Arbetskö<span id="queue-count">0</span></button>
       <button data-page="images" class="nav">${icons.plus}Bilder</button>
+      <button data-page="gallery" class="nav">${icons.library}Galleri</button>
       <button data-page="devices" class="nav">${icons.device}Diktafon</button>
       <button data-page="settings" class="nav">${icons.settings}Inställningar</button>
     </nav>
@@ -53,7 +54,7 @@ app.innerHTML = `
       <div class="workspace"><section class="recording-panel"><div class="list-head"><h2>Bibliotek</h2><span id="list-count">0 filer</span></div><label class="search-label"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="Sök namn eller transkript…" aria-label="Sök inspelningar" /></label><div id="recording-list"></div></section>
       <section class="detail-panel" id="detail"><div class="detail-empty"><span class="empty-icon">${icons.wave}</span><h2>En tanke börjar med din röst</h2><p>Anslut din Sony-diktafon eller importera en mapp med inspelningar. Välj sedan en fil för att lyssna och läsa.</p><span class="format-note">MP3 & WAV · SVENSK TRANSKRIBERING</span></div></section></div>
     </section>
-    <section id="images-page" class="hidden"></section><section id="queue-page" class="hidden"></section><section id="devices-page" class="hidden"></section><section id="settings-page" class="hidden"></section>
+    <section id="images-page" class="hidden"></section><section id="gallery-page" class="hidden"></section><section id="queue-page" class="hidden"></section><section id="devices-page" class="hidden"></section><section id="settings-page" class="hidden"></section>
     <footer><span id="activity">Redo</span><span id="archive-location"></span></footer>
   </main>
   <dialog id="import-dialog"><form id="import-form"><div class="eyebrow">LOKAL IMPORT</div><h2>Importera inspelningar</h2><p>Ange mappen med ljudfiler. Undermappar tas med och originalen bevaras.</p><label>Mappens fullständiga sökväg<input id="import-path" required placeholder="/run/media/ditt-namn/IC RECORDER/PRIVATE/SONY/REC_FILE" /></label><div class="dialog-actions"><button type="button" id="import-cancel" class="secondary">Avbryt</button><button type="submit" class="primary">Importera mapp</button></div></form></dialog>
@@ -63,7 +64,7 @@ const imagesView = new ImagesView($('#images-page'), () => document.querySelecto
   if (dirty && !window.confirm('Du har osparade rättningar. Lämna dem?')) return;
   dirty = false;
   selected = id; navigate('library'); void action(() => loadDetail(id, runId ?? undefined));
-});
+}, $('#gallery-page'));
 
 function toast(message: string, error = false) {
   clearTimeout(toastTimer);
@@ -287,13 +288,15 @@ function navigate(next: typeof page) {
   if (page === 'library' && next !== page) { audioSource?.dispose(); audioSource = null; dirty = false; }
   if (page === 'images' && next !== page) imagesView.hide();
   if (page === 'library' && next !== page) selectionEvents?.abort();
+  imagesView.hideGallery();
   page = next;
-  for (const name of ['library', 'queue', 'images', 'devices', 'settings']) $(`#${name}-page`).classList.toggle('hidden', name !== page);
+  for (const name of ['library', 'queue', 'images', 'gallery', 'devices', 'settings']) $(`#${name}-page`).classList.toggle('hidden', name !== page);
   document.querySelectorAll<HTMLElement>('[data-page]').forEach(b => b.classList.toggle('active', b.dataset.page === page));
-  $('#page-label').textContent = { library: 'Inspelningar', queue: 'Arbetskö', images: 'Bilder', devices: 'Diktafon', settings: 'Inställningar' }[page];
+  $('#page-label').textContent = { library: 'Inspelningar', queue: 'Arbetskö', images: 'Bilder', gallery: 'Galleri', devices: 'Diktafon', settings: 'Inställningar' }[page];
   if (page === 'devices') renderDevices();
   if (page === 'queue') renderQueue();
   if (page === 'images') imagesView.show();
+  if (page === 'gallery') imagesView.showGallery();
   if (page === 'settings') renderSettings();
   if (page === 'library' && selected) void action(() => loadDetail(selected!));
 }

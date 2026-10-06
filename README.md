@@ -150,3 +150,5 @@ Verifierat på denna dator: desktopbygge, TypeScriptbygge, Clippy, 13 automatisk
 Arbetskö visar pågående och väntande inspelningar i behandlingsordning samt misslyckade jobb med felorsak. Välj **Starta kön** för att aktivera transkribering; **Pausa kön** stoppar efter pågående inspelning. Försök igen köar om filen och bevarar tidigare transkript, men aktiverar inte en pausad kö. Vid fel när modellen laddas kan du korrigera inställningarna och välja **Starta om motorn**.
 
 Under **Inställningar → Sparade bildflöden** kan du ta bort flöden. Bildhistorik, sparade bilder och redan köade jobb behåller sina workflow-kopior. Om det valda flödet tas bort behöver du välja ett annat under Bilder innan nästa bild skapas.
+
+Bilder visar de fem senaste enskilda bilderna. Under **Galleri** finns alla sparade bilder med de senaste först. **Ta bort bild** raderar den lokala kopian efter bekräftelse; ComfyUI-originalet och övriga bilder i samma jobb behålls. Borttagna bilder hämtas inte tillbaka vid uppföljning av jobbet.

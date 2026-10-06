@@ -86,6 +86,23 @@ async fn dismiss_image_job(state: State<'_, AppState>, id: String) -> ApiResult<
     .map_err(err)?
 }
 #[tauri::command]
+async fn delete_generated_image(
+    state: State<'_, AppState>,
+    id: String,
+    path: String,
+) -> ApiResult<()> {
+    let service = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = service.image_operations.lock().unwrap();
+        service
+            .db
+            .delete_generated_image(&service.root, &id, &path)
+            .map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+#[tauri::command]
 async fn follow_image_job(state: State<'_, AppState>, id: String) -> ApiResult<()> {
     let service = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -274,6 +291,7 @@ pub fn run() {
             save_workflow,
             select_workflow,
             delete_workflow,
+            delete_generated_image,
             save_comfy_connection,
             comfy_server_status,
             start_comfy_server,

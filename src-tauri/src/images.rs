@@ -94,6 +94,10 @@ pub struct ImageDraft {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GeneratedImage {
+    #[serde(default)]
+    pub deleted: bool,
+    #[serde(default)]
+    pub created_at: Option<String>,
     pub path: String,
     pub node_id: String,
     pub filename: String,
@@ -121,6 +125,39 @@ pub struct ImageSnapshot {
 }
 
 impl Database {
+    pub fn delete_generated_image(&self, root: &Path, id: &str, path: &str) -> Result<()> {
+        let mut job = self
+            .image_jobs()?
+            .into_iter()
+            .find(|j| j.id == id)
+            .context("Bildjobbet finns inte")?;
+        let image = job
+            .images
+            .iter_mut()
+            .find(|i| i.path == path)
+            .context("Bilden finns inte i bildjobbet")?;
+        let file = std::path::PathBuf::from(&image.path);
+        let directory = root.join("images").join(&job.id);
+        anyhow::ensure!(
+            file.parent() == Some(directory.as_path()),
+            "Ogiltig bildsökväg"
+        );
+        if file.exists() {
+            anyhow::ensure!(
+                file.canonicalize()?
+                    .starts_with(root.join("images").canonicalize()?),
+                "Bilden ligger utanför bildarkivet"
+            );
+        }
+        // Save the tombstone first so a crash or later follow-up cannot restore the image.
+        image.deleted = true;
+        self.save_image_job(&job)?;
+        match std::fs::remove_file(&file) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
     pub fn comfy_settings(&self) -> Result<ComfySettings> {
         let value: Option<String> = self
             .connect()?
@@ -665,7 +702,7 @@ fn download_images(
                     && i.filename == filename
                     && i.subfolder == subfolder
                     && i.image_type == image_type
-                    && Path::new(&i.path).is_file()
+                    && (i.deleted || Path::new(&i.path).is_file())
             }) {
                 continue;
             }
@@ -712,6 +749,8 @@ fn download_images(
             }
             result?;
             job.images.push(GeneratedImage {
+                deleted: false,
+                created_at: Some(chrono::Utc::now().to_rfc3339()),
                 path: path.to_string_lossy().into(),
                 node_id: node_id.clone(),
                 filename: filename.into(),
@@ -829,6 +868,53 @@ mod tests {
         })?;
         let job = db.next_image_job()?.unwrap();
         Ok((temp, db, job))
+    }
+    #[test]
+    fn deleted_images_stay_deleted_and_preserve_other_results() -> Result<()> {
+        let (temp, db, mut job) = fixture()?;
+        let directory = temp.path().join("images").join(&job.id);
+        std::fs::create_dir_all(&directory)?;
+        for name in ["first.png", "second.png"] {
+            let path = directory.join(name);
+            std::fs::write(&path, b"image")?;
+            job.images.push(GeneratedImage {
+                deleted: false,
+                created_at: None,
+                path: path.to_string_lossy().into(),
+                node_id: "9".into(),
+                filename: name.into(),
+                subfolder: "".into(),
+                image_type: "output".into(),
+            });
+        }
+        db.save_image_job(&job)?;
+        let first = job.images[0].path.clone();
+        assert!(db
+            .delete_generated_image(temp.path(), &job.id, "/tmp/unrelated.png")
+            .is_err());
+        db.delete_generated_image(temp.path(), &job.id, &first)?;
+        db.delete_generated_image(temp.path(), &job.id, &first)?;
+        assert!(!Path::new(&first).exists());
+        assert!(Path::new(&job.images[1].path).exists());
+        let reopened = Database::open(temp.path())?;
+        let mut stored = reopened.image_jobs()?.remove(0);
+        assert!(stored.images[0].deleted);
+        assert_eq!(stored.images.len(), 2);
+        // Both outputs are already accounted for, including the deleted one.
+        // An unusable server URL would fail if the deleted image were fetched again.
+        stored.config.url = "http://127.0.0.1:1".into();
+        download_images(
+            &Client::new(),
+            temp.path(),
+            &mut stored,
+            &json!({"9":{"images":[
+                {"filename":"first.png"}, {"filename":"second.png"}
+            ]}}),
+            &reopened,
+        )?;
+        assert_eq!(stored.images.len(), 2);
+        assert!(!Path::new(&first).exists());
+        Ok(())
     }
     fn wait_until(mut condition: impl FnMut() -> bool) -> Result<()> {
         let deadline = Instant::now() + Duration::from_secs(20);

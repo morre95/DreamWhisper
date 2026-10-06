@@ -7,7 +7,7 @@ export interface ComfySettings {
   selected_workflow_id: string | null; comfy_directory: string; comfy_python_path: string;
 }
 export interface ImageDraft { prompt: string; negative_prompt: string | null; source_text: string; recording_id: string | null; run_id: string | null }
-export interface GeneratedImage { path: string; node_id: string; filename: string; subfolder: string; image_type: string }
+export interface GeneratedImage { deleted?: boolean; created_at?: string | null; path: string; node_id: string; filename: string; subfolder: string; image_type: string }
 export interface ImageJob { id: string; created_at: string; draft: ImageDraft; config: ComfySettings; status: string; prompt_id: string | null; error: string | null; images: GeneratedImage[]; release_pending: boolean }
 export interface SavedWorkflow { id: string; name: string; workflow: ComfySettings['workflow']; node_id: string; input_name: string; negative_field: PromptField | null }
 interface ImageSnapshot { workflows: SavedWorkflow[]; settings: ComfySettings; draft: ImageDraft; jobs: ImageJob[] }
@@ -27,6 +27,10 @@ export function selectedText(container: HTMLElement, selection: Selection | null
   if (!container.contains(range.startContainer) || !container.contains(range.endContainer)) return '';
   return selection.toString().trim();
 }
+export function galleryImages(jobs: ImageJob[]) {
+  return jobs.flatMap(job => [...job.images].reverse().filter(image => !image.deleted).map(image => ({ job, image })))
+    .sort((a, b) => Date.parse(b.image.created_at ?? b.job.created_at) - Date.parse(a.image.created_at ?? a.job.created_at));
+}
 const statuses: Record<string, string> = { queued: 'Väntar på GPU', submitting: 'Skickar / bekräftar jobb', queued_comfy: 'I ComfyUI-kön', running: 'Skapar bild', downloading: 'Hämtar bilder', completed: 'Klar', failed: 'Misslyckad', uncertain: 'Behöver kontrolleras' };
 
 export class ImagesView {
@@ -39,9 +43,10 @@ export class ImagesView {
   private workflowChanging = false;
   private serverStarting = false;
   private visible = false;
+  private galleryVisible = false;
   private creating = false;
   private readonly esc = escapeHtml;
-  constructor(private readonly container: HTMLElement, private readonly configContainer: () => HTMLElement | null, private readonly notify: (text: string, error?: boolean) => void, private readonly openRecording: (id: string, runId: string | null) => void) {}
+  constructor(private readonly container: HTMLElement, private readonly configContainer: () => HTMLElement | null, private readonly notify: (text: string, error?: boolean) => void, private readonly openRecording: (id: string, runId: string | null) => void, private readonly galleryContainer?: HTMLElement) {}
   async refresh() {
     if (!isTauri()) return;
     const version = this.draftVersion;
@@ -55,9 +60,12 @@ export class ImagesView {
       this.renderJobs();
       this.updateCreateButton();
     }
+    if (this.galleryVisible) this.renderGallery();
     this.renderSavedWorkflowSettings();
     await this.refreshServerStatus();
   }
+  showGallery() { this.galleryVisible = true; this.renderGallery(); }
+  hideGallery() { this.galleryVisible = false; }
   show() { this.visible = true; this.render(); }
   hide() { this.visible = false; void this.persist().catch(e => this.notify(String(e), true)); }
   async fromSelection(text: string, recordingId: string, runId: string | null): Promise<boolean> {
@@ -93,7 +101,7 @@ export class ImagesView {
       <p id="image-source" class="muted">${this.draft.recording_id ? 'Utkast från ett transkript. Ändringar här påverkar inte transkriptet.' : 'Fristående bildprompt.'}</p>
       <div class="device-actions"><button id="generate-image" class="primary">Skapa bild</button><button id="clear-image-draft" class="secondary">Nytt utkast</button></div>
       <p class="muted">Whisper lämnar plats åt bildskapandet på GPU:n. ComfyUI kan startas under Inställningar.</p></div>
-      <div id="image-jobs" aria-live="polite"></div>`;
+      <section><h2>De fem senaste bilderna</h2><div id="latest-images"></div></section><div id="image-jobs" aria-live="polite"></div>`;
     const input = this.container.querySelector<HTMLTextAreaElement>('#image-prompt')!;
     input.oninput = () => { this.draft.prompt = input.value; this.change(); this.updateCreateButton(); };
     this.container.querySelector<HTMLTextAreaElement>('#image-negative-prompt')!.oninput = event => {
@@ -139,12 +147,13 @@ export class ImagesView {
     const target = this.container.querySelector<HTMLElement>('#image-jobs');
     if (!target) return;
     const esc = this.esc;
+    this.renderImageCards(this.container.querySelector<HTMLElement>('#latest-images')!, 5);
     const jobs = this.snapshot?.jobs ?? [];
     const html = jobs.length ? jobs.map(job => `<article class="settings-card image-job"><div class="image-job-head"><h2>${esc(new Date(job.created_at).toLocaleString('sv-SE'))}</h2><span class="status ${job.status === 'completed' ? 'completed' : job.status === 'failed' || job.status === 'uncertain' ? 'failed' : 'queued'}">${esc(statuses[job.status] ?? job.status)}</span></div>
       ${job.release_pending && ['completed', 'failed', 'uncertain'].includes(job.status) ? '<p class="muted">Väntar på ledig ComfyUI-kö och frigör GPU-minnet innan Whisper återstartas.</p>' : ''}
       ${job.error ? `<p class="inline-error">${esc(job.error)}</p>` : ''}
       <details><summary>Bildprompt och workflow</summary><p class="image-prompt-preview">${esc(job.draft.prompt)}</p>${job.draft.negative_prompt != null ? `<b>Negativ prompt</b><p class="image-prompt-preview">${esc(job.draft.negative_prompt) || '(tom)'}</p>` : ''}<small>${esc(job.config.workflow_name)}</small></details>
-      <div class="image-gallery">${job.images.map(image => `<a href="${esc(convertFileSrc(image.path))}" target="_blank" rel="noopener" data-image-preview="${esc(image.path)}"><img src="${esc(convertFileSrc(image.path))}" loading="lazy" alt="Bild skapad från den sparade bildprompten" /></a>`).join('')}</div>
+
       <div class="device-actions"><button class="secondary small" data-reuse-image="${esc(job.id)}">Använd prompt igen</button>${job.draft.recording_id ? `<button class="secondary small" data-image-source="${esc(job.id)}">Öppna inspelningen</button>` : ''}${job.prompt_id && ['failed', 'uncertain'].includes(job.status) && !job.release_pending ? `<button class="secondary small" data-follow-image="${esc(job.id)}">Följ upp / hämta igen</button>` : ''}${job.release_pending && job.error ? `<button class="secondary small" data-dismiss-image="${esc(job.id)}">Avsluta uppföljning</button>` : ''}</div>
       </article>`).join('') : '<div class="settings-card"><p class="muted">Här visas bildjobben och dina sparade bilder.</p></div>';
     // Preserve focus and image loading when the poll contains no changes.
@@ -170,13 +179,39 @@ export class ImagesView {
       try { await invoke('follow_image_job', { id: button.dataset.followImage }); await this.refresh(); }
       catch (e) { this.notify(String(e), true); button.disabled = false; }
     })());
-    target.querySelectorAll<HTMLAnchorElement>('[data-image-preview]').forEach(link => link.onclick = event => {
-      event.preventDefault();
+  }
+
+  private renderGallery() {
+    if (!this.galleryContainer) return;
+    if (!this.galleryContainer.querySelector('#all-images')) {
+      this.galleryContainer.innerHTML = '<div class="page-heading"><div><div class="eyebrow">DITT BILDARKIV</div><h1>Galleri</h1><p>Alla dina skapade bilder, med de senaste först.</p></div></div><div id="all-images"></div>';
+    }
+    this.renderImageCards(this.galleryContainer.querySelector<HTMLElement>('#all-images')!);
+  }
+  private renderImageCards(target: HTMLElement, limit?: number) {
+    const entries = galleryImages(this.snapshot?.jobs ?? []).slice(0, limit);
+    const esc = this.esc;
+    const html = entries.length ? `<div class="image-gallery">${entries.map(({ job, image }, index) => `<article class="settings-card gallery-card">
+      <button class="image-thumbnail" data-preview="${index}" aria-label="Visa bilden större"><img src="${esc(convertFileSrc(image.path))}" loading="lazy" alt="${esc(job.draft.prompt)}" /></button>
+      <p><b>${esc(job.config.workflow_name)}</b><br><small>${esc(new Date(image.created_at ?? job.created_at).toLocaleString('sv-SE'))}</small></p>
+      <details><summary>Bildprompt</summary><p class="image-prompt-preview">${esc(job.draft.prompt)}</p>${job.draft.negative_prompt != null ? `<b>Negativ prompt</b><p class="image-prompt-preview">${esc(job.draft.negative_prompt)}</p>` : ''}</details>
+      <button class="secondary small" data-delete="${index}">Ta bort bild</button></article>`).join('')}</div>` : '<p class="muted">Inga sparade bilder ännu.</p>';
+    if (target.dataset.rendered === html) return;
+    target.dataset.rendered = html; target.innerHTML = html;
+    target.querySelectorAll<HTMLButtonElement>('[data-preview]').forEach(button => button.onclick = () => {
+      const { image } = entries[Number(button.dataset.preview)];
       const dialog = document.createElement('dialog'); dialog.className = 'image-preview-dialog';
-      dialog.innerHTML = `<button class="secondary">Stäng</button><img src="${esc(convertFileSrc(link.dataset.imagePreview!))}" alt="Skapad bild" />`;
+      dialog.innerHTML = `<button class="secondary">Stäng</button><img src="${esc(convertFileSrc(image.path))}" alt="Skapad bild" />`;
       dialog.querySelector('button')!.onclick = () => dialog.close(); dialog.onclose = () => dialog.remove();
       document.body.append(dialog); dialog.showModal();
     });
+    target.querySelectorAll<HTMLButtonElement>('[data-delete]').forEach(button => button.onclick = () => void (async () => {
+      if (!window.confirm('Ta bort bilden från ditt lokala bildarkiv? Bildfilen raderas. Originalet i ComfyUI påverkas inte.')) return;
+      const { job, image } = entries[Number(button.dataset.delete)];
+      button.disabled = true;
+      try { await invoke('delete_generated_image', { id: job.id, path: image.path }); await this.refresh(); this.notify('Bilden har tagits bort.'); }
+      catch (e) { this.notify(String(e), true); button.disabled = false; }
+    })());
   }
   private renderWorkflows() {
     const target = this.container.querySelector<HTMLElement>('#workflow-library'); if (!target) return;

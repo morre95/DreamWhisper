@@ -9,7 +9,7 @@ globalThis.window = { confirm: () => true };
 const source = readFileSync(new URL('../src/images.ts', import.meta.url), 'utf8')
   .replace(/import .* from '@tauri-apps\/api\/core';/, 'const { invoke, convertFileSrc, isTauri } = (globalThis as any).__imageTestBridge;');
 const code = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
-const { ImagesView, selectedText, workflowFields, escapeHtml } = await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
+const { ImagesView, selectedText, workflowFields, escapeHtml, galleryImages } = await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
 const snapshot = (prompt = '') => ({ settings: { url: 'http://127.0.0.1:8188', workflow: {}, workflow_name: '', node_id: '', input_name: '' }, draft: { prompt, source_text: '', recording_id: null, run_id: null }, jobs: [] });
 const view = () => new ImagesView({}, () => null, () => {}, () => {});
 
@@ -76,4 +76,14 @@ test('overlapping draft saves serialize and persist the latest edit last', async
 
 test('prompt and workflow titles are escaped before displaying them', () => {
   assert.equal(escapeHtml('<script>"&'), '&lt;script&gt;&quot;&amp;');
+});
+
+
+test('gallery filters deleted images and limits individual images rather than jobs', () => {
+  const job = { id: 'batch', created_at: '2026-01-01', images: Array.from({ length: 8 }, (_, i) => ({ path: String(i), deleted: i === 7 })) };
+  const laterImage = { id: 'old-job', created_at: '2025-01-01', images: [{ path: 'latest', created_at: '2026-02-01' }] };
+  const entries = galleryImages([job, laterImage]);
+  assert.equal(entries.length, 8);
+  assert.deepEqual(entries.slice(0, 5).map(e => e.image.path), ['latest', '6', '5', '4', '3']);
+  assert.equal(galleryImages([]).length, 0);
 });
