@@ -3,6 +3,7 @@ name = "dreamwhisper"
 version = "0.1.0"
 description = "Lokalt ljudarkiv och svensk transkribering"
 edition = "2021"
+license = "MIT"
 
 [lib]
 name = "dreamwhisper_lib"

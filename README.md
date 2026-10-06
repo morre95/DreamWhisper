@@ -2,6 +2,8 @@
 
 En Linuxapp för eget bruk som importerar Sony ICD-UX570-inspelningar, bevarar originalen och transkriberar svenska lokalt med KB-Whisper large.
 
+Licens: [MIT](LICENSE). Copyright © 2026 Erik Morén.
+
 ## Starta appen
 
 Kräver Rust, Node.js 22.12+ och Linuxbiblioteken för Tauri 2: GTK 3, WebKitGTK 4.1 och Ayatana AppIndicator. UDisks2 ska vara igång på systemets D-Bus. Projektets npm- och Cargo-lockfiler låser desktopberoendena.
