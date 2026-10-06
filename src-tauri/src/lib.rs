@@ -1,5 +1,6 @@
 pub mod archive;
 pub mod autostart;
+pub mod comfy_server;
 pub mod db;
 pub mod devices;
 pub mod images;

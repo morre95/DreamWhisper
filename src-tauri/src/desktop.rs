@@ -22,12 +22,54 @@ fn save_comfy_settings(
     state.db.save_comfy_settings(&settings).map_err(err)
 }
 #[tauri::command]
+fn save_workflow(
+    state: State<'_, AppState>,
+    workflow: crate::images::SavedWorkflow,
+) -> ApiResult<String> {
+    state.db.save_workflow(workflow).map_err(err)
+}
+#[tauri::command]
+fn select_workflow(state: State<'_, AppState>, id: String) -> ApiResult<()> {
+    state.db.select_workflow(&id).map_err(err)
+}
+#[tauri::command]
+fn save_comfy_connection(
+    state: State<'_, AppState>,
+    settings: crate::images::ComfyConnection,
+) -> ApiResult<()> {
+    state.db.save_comfy_connection(settings).map_err(err)
+}
+#[tauri::command]
+fn comfy_server_status(state: State<'_, AppState>) -> crate::comfy_server::ServerStatus {
+    state.comfy_server.lock().unwrap().snapshot()
+}
+#[tauri::command]
+async fn start_comfy_server(
+    state: State<'_, AppState>,
+) -> ApiResult<crate::comfy_server::ServerStatus> {
+    let service = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let settings = service.db.comfy_settings().map_err(err)?;
+        crate::comfy_server::ComfyServer::start(&service.comfy_server, &settings, &service.root)
+            .map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+#[tauri::command]
 fn save_image_draft(state: State<'_, AppState>, draft: crate::images::ImageDraft) -> ApiResult<()> {
     state.db.save_image_draft(&draft).map_err(err)
 }
 #[tauri::command]
-fn create_image(state: State<'_, AppState>, draft: crate::images::ImageDraft) -> ApiResult<String> {
-    state.db.enqueue_image(draft).map_err(err)
+fn create_image(
+    state: State<'_, AppState>,
+    draft: crate::images::ImageDraft,
+    workflow_id: Option<String>,
+) -> ApiResult<String> {
+    state
+        .db
+        .enqueue_image_with_workflow(draft, workflow_id.as_deref())
+        .map_err(err)
 }
 #[tauri::command]
 async fn dismiss_image_job(state: State<'_, AppState>, id: String) -> ApiResult<()> {
@@ -225,6 +267,11 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            save_workflow,
+            select_workflow,
+            save_comfy_connection,
+            comfy_server_status,
+            start_comfy_server,
             image_snapshot,
             save_comfy_settings,
             save_image_draft,

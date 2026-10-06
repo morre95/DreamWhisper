@@ -19,6 +19,12 @@ pub struct ComfySettings {
     pub workflow_name: String,
     pub node_id: String,
     pub input_name: String,
+    #[serde(default)]
+    pub selected_workflow_id: Option<String>,
+    #[serde(default = "default_comfy_directory")]
+    pub comfy_directory: String,
+    #[serde(default = "default_comfy_python")]
+    pub comfy_python_path: String,
 }
 impl Default for ComfySettings {
     fn default() -> Self {
@@ -28,8 +34,44 @@ impl Default for ComfySettings {
             workflow_name: String::new(),
             node_id: String::new(),
             input_name: String::new(),
+            selected_workflow_id: None,
+            comfy_directory: default_comfy_directory(),
+            comfy_python_path: default_comfy_python(),
         }
     }
+}
+fn default_comfy_directory() -> String {
+    let path = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
+        .join("comfy/ComfyUI");
+    if path.join("main.py").is_file() {
+        path.to_string_lossy().into()
+    } else {
+        String::new()
+    }
+}
+fn default_comfy_python() -> String {
+    let path = std::path::PathBuf::from(default_comfy_directory()).join(".venv/bin/python");
+    if path.is_file() {
+        path.to_string_lossy().into()
+    } else {
+        String::new()
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SavedWorkflow {
+    pub id: String,
+    pub name: String,
+    pub workflow: Value,
+    pub node_id: String,
+    pub input_name: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ComfyConnection {
+    pub url: String,
+    pub comfy_directory: String,
+    pub comfy_python_path: String,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ImageDraft {
@@ -60,6 +102,7 @@ pub struct ImageJob {
 }
 #[derive(Serialize)]
 pub struct ImageSnapshot {
+    pub workflows: Vec<SavedWorkflow>,
     pub settings: ComfySettings,
     pub draft: ImageDraft,
     pub jobs: Vec<ImageJob>,
@@ -78,9 +121,85 @@ impl Database {
     }
     pub fn save_comfy_settings(&self, config: &ComfySettings) -> Result<()> {
         validate_url(&config.url)?;
-        validate_workflow(&config.workflow)?;
-        build_prompt(config, "test")?;
+        if !config.workflow.as_object().is_some_and(|w| w.is_empty()) {
+            validate_workflow(&config.workflow)?;
+            build_prompt(config, "test")?;
+        }
         self.connect()?.execute("INSERT INTO image_config VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET json=excluded.json", [serde_json::to_string(config)?])?;
+        Ok(())
+    }
+    pub fn saved_workflows(&self) -> Result<Vec<SavedWorkflow>> {
+        let c = self.connect()?;
+        let mut q = c.prepare("SELECT json FROM image_workflows ORDER BY rowid")?;
+        let rows = q
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.iter().map(|s| Ok(serde_json::from_str(s)?)).collect()
+    }
+    pub fn save_workflow(&self, mut workflow: SavedWorkflow) -> Result<String> {
+        workflow.name = workflow.name.trim().into();
+        if workflow.name.is_empty() || workflow.name.chars().count() > 120 {
+            bail!("Ange ett flödesnamn med 1–120 tecken.");
+        }
+        if serde_json::to_vec(&workflow.workflow)?.len() > 5 * 1024 * 1024 {
+            bail!("Workflow är större än 5 MB.");
+        }
+        let config = ComfySettings {
+            workflow: workflow.workflow.clone(),
+            node_id: workflow.node_id.clone(),
+            input_name: workflow.input_name.clone(),
+            ..Default::default()
+        };
+        build_prompt(&config, "test")?;
+        if workflow.id.is_empty() {
+            workflow.id = uuid::Uuid::new_v4().to_string();
+        } else if !self.saved_workflows()?.iter().any(|w| w.id == workflow.id) {
+            bail!("Flödet finns inte längre.");
+        }
+        self.connect()?.execute("INSERT INTO image_workflows VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET json=excluded.json", rusqlite::params![workflow.id,serde_json::to_string(&workflow)?])?;
+        self.select_workflow(&workflow.id)?;
+        Ok(workflow.id)
+    }
+    pub fn select_workflow(&self, id: &str) -> Result<()> {
+        if !self.saved_workflows()?.iter().any(|w| w.id == id) {
+            bail!("Flödet saknas.");
+        }
+        let mut config = self.comfy_settings()?;
+        config.selected_workflow_id = Some(id.into());
+        self.save_comfy_settings(&config)
+    }
+    pub fn save_comfy_connection(&self, connection: ComfyConnection) -> Result<()> {
+        let mut config = self.comfy_settings()?;
+        config.url = connection.url.trim().into();
+        config.comfy_directory = connection.comfy_directory.trim().into();
+        config.comfy_python_path = connection.comfy_python_path.trim().into();
+        self.save_comfy_settings(&config)
+    }
+    pub fn migrate_legacy_workflow(&self) -> Result<()> {
+        let mut config = self.comfy_settings()?;
+        if config.selected_workflow_id.is_some() || build_prompt(&config, "test").is_err() {
+            return Ok(());
+        }
+        let workflow = SavedWorkflow {
+            id: "legacy".into(),
+            name: if config.workflow_name.trim().is_empty() {
+                "Tidigare flöde".into()
+            } else {
+                config.workflow_name.clone()
+            },
+            workflow: config.workflow.clone(),
+            node_id: config.node_id.clone(),
+            input_name: config.input_name.clone(),
+        };
+        let mut c = self.connect()?;
+        let tx = c.transaction()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO image_workflows VALUES(?1,?2)",
+            rusqlite::params![workflow.id, serde_json::to_string(&workflow)?],
+        )?;
+        config.selected_workflow_id = Some(workflow.id);
+        tx.execute("INSERT INTO image_config VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET json=excluded.json", [serde_json::to_string(&config)?])?;
+        tx.commit()?;
         Ok(())
     }
     pub fn image_draft(&self) -> Result<ImageDraft> {
@@ -116,6 +235,13 @@ impl Database {
         Ok(())
     }
     pub fn enqueue_image(&self, draft: ImageDraft) -> Result<String> {
+        self.enqueue_image_with_workflow(draft, None)
+    }
+    pub fn enqueue_image_with_workflow(
+        &self,
+        draft: ImageDraft,
+        workflow_id: Option<&str>,
+    ) -> Result<String> {
         if draft.prompt.trim().is_empty() {
             bail!("Skriv en bildprompt först.");
         }
@@ -124,6 +250,18 @@ impl Database {
         }
         let mut config = self.comfy_settings()?;
         validate_url(&config.url)?;
+        if let Some(id) = workflow_id.or(config.selected_workflow_id.as_deref()) {
+            let workflow = self
+                .saved_workflows()?
+                .into_iter()
+                .find(|w| w.id == id)
+                .context("Det valda flödet finns inte längre.")?;
+            config.selected_workflow_id = Some(workflow.id);
+            config.workflow = workflow.workflow;
+            config.workflow_name = workflow.name;
+            config.node_id = workflow.node_id;
+            config.input_name = workflow.input_name;
+        }
         config.workflow = build_prompt(&config, &draft.prompt)?;
         // Resolve source references before committing a durable job.
         if let Some(id) = &draft.recording_id {
@@ -160,6 +298,7 @@ impl Database {
     }
     pub fn image_snapshot(&self) -> Result<ImageSnapshot> {
         Ok(ImageSnapshot {
+            workflows: self.saved_workflows()?,
             settings: self.comfy_settings()?,
             draft: self.image_draft()?,
             jobs: self.image_jobs()?,
@@ -283,6 +422,7 @@ pub fn test_connection(url: &str) -> Result<()> {
     response_json(
         client()?
             .get(endpoint(&config, "/system_stats"))
+            .timeout(Duration::from_secs(3))
             .send()
             .context("ComfyUI kunde inte nås. Starta servern och kontrollera adressen.")?,
     )?;
@@ -719,6 +859,104 @@ for line in sys.stdin:
         Ok(())
     }
     #[test]
+    fn saved_workflows_survive_restart_and_each_job_keeps_its_selected_flow() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let db = Database::open(temp.path())?;
+        let original = config();
+        let first = db.save_workflow(SavedWorkflow {
+            id: String::new(),
+            name: "Foto".into(),
+            workflow: original.workflow.clone(),
+            node_id: "6".into(),
+            input_name: "text".into(),
+        })?;
+        let mut second_json = original.workflow.clone();
+        second_json["3"]["inputs"]["steps"] = json!(50);
+        let second = db.save_workflow(SavedWorkflow {
+            id: String::new(),
+            name: "Illustration".into(),
+            workflow: second_json,
+            node_id: "6".into(),
+            input_name: "text".into(),
+        })?;
+        db.select_workflow(&first)?;
+        let first_job = db.enqueue_image_with_workflow(
+            ImageDraft {
+                prompt: "första bilden".into(),
+                ..Default::default()
+            },
+            Some(&first),
+        )?;
+        db.select_workflow(&second)?;
+        db.enqueue_image(ImageDraft {
+            prompt: "andra bilden".into(),
+            ..Default::default()
+        })?;
+        let reopened = Database::open(temp.path())?;
+        assert_eq!(reopened.saved_workflows()?.len(), 2);
+        assert_eq!(
+            reopened.comfy_settings()?.selected_workflow_id.as_deref(),
+            Some(second.as_str())
+        );
+        let jobs = reopened.image_jobs()?;
+        let first_copy = jobs.iter().find(|j| j.id == first_job).unwrap();
+        assert_eq!(first_copy.config.workflow_name, "Foto");
+        assert_eq!(first_copy.config.workflow["3"]["inputs"]["steps"], 20);
+        assert_eq!(jobs[0].config.workflow_name, "Illustration");
+        assert_eq!(jobs[0].config.workflow["3"]["inputs"]["steps"], 50);
+        let mut edited = reopened
+            .saved_workflows()?
+            .into_iter()
+            .find(|w| w.id == first)
+            .unwrap();
+        edited.name = "Ändrat foto".into();
+        edited.workflow["3"]["inputs"]["steps"] = json!(99);
+        reopened.save_workflow(edited)?;
+        assert_eq!(
+            reopened
+                .image_jobs()?
+                .iter()
+                .find(|j| j.id == first_job)
+                .unwrap()
+                .config
+                .workflow["3"]["inputs"]["steps"],
+            20
+        );
+        assert!(reopened.select_workflow("missing").is_err());
+        Ok(())
+    }
+    #[test]
+    fn legacy_workflow_migrates_once_without_losing_server_settings() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let db = Database::open(temp.path())?;
+        let mut config = config();
+        config.workflow_name = "Mitt gamla flöde".into();
+        config.url = "http://127.0.0.1:9191".into();
+        db.save_comfy_settings(&config)?;
+        db.connect()?
+            .execute_batch("DROP TABLE image_workflows; PRAGMA user_version=2;")?;
+        let db = Database::open(temp.path())?;
+        assert_eq!(db.saved_workflows()?.len(), 1);
+        assert_eq!(db.saved_workflows()?[0].name, "Mitt gamla flöde");
+        assert_eq!(
+            db.comfy_settings()?.selected_workflow_id.as_deref(),
+            Some("legacy")
+        );
+        assert_eq!(db.comfy_settings()?.url, "http://127.0.0.1:9191");
+        assert_eq!(Database::open(temp.path())?.saved_workflows()?.len(), 1);
+        db.save_comfy_connection(ComfyConnection {
+            url: "http://127.0.0.1:8188".into(),
+            comfy_directory: "/tmp/test".into(),
+            comfy_python_path: "/tmp/python".into(),
+        })?;
+        assert_eq!(
+            db.comfy_settings()?.selected_workflow_id.as_deref(),
+            Some("legacy")
+        );
+        assert_eq!(db.saved_workflows()?[0].workflow, config.workflow);
+        Ok(())
+    }
+    #[test]
     fn workflow_changes_only_explicit_text_field_and_rejects_ui_format() -> Result<()> {
         let original = config();
         let prompt = build_prompt(&original, "changed")?;
@@ -758,7 +996,7 @@ for line in sys.stdin:
             reopened
                 .connect()?
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))?,
-            2
+            3
         );
         Ok(())
     }

@@ -27,6 +27,7 @@ pub struct Service {
     runtime: Mutex<Runtime>,
     importing: Mutex<()>,
     pub image_operations: Mutex<()>,
+    pub comfy_server: Arc<Mutex<crate::comfy_server::ComfyServer>>,
     pub stop: AtomicBool,
     worker_revision: AtomicU64,
     _lock: File,
@@ -58,6 +59,7 @@ impl Service {
             }),
             importing: Mutex::new(()),
             image_operations: Mutex::new(()),
+            comfy_server: Arc::new(Mutex::new(crate::comfy_server::ComfyServer::default())),
             stop: AtomicBool::new(false),
             worker_revision: AtomicU64::new(0),
             _lock: lock,
@@ -164,6 +166,7 @@ impl Service {
     }
     pub fn shutdown(&self) {
         self.stop.store(true, Ordering::Relaxed);
+        self.comfy_server.lock().unwrap().shutdown();
     }
     pub fn start(self: &Arc<Self>, script: PathBuf) {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);

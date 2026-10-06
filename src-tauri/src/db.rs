@@ -25,7 +25,7 @@ impl Database {
         };
         let c = db.connect()?;
         let version: u32 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 2 {
+        if version > 3 {
             bail!("Databasen tillhör en nyare version av DreamWhisper");
         }
         c.execute_batch("PRAGMA journal_mode=WAL;
@@ -60,8 +60,12 @@ impl Database {
         CREATE TABLE IF NOT EXISTS image_config (id INTEGER PRIMARY KEY CHECK(id=1), json TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS image_draft (id INTEGER PRIMARY KEY CHECK(id=1), json TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS image_jobs (id TEXT PRIMARY KEY, json TEXT NOT NULL);
-        PRAGMA user_version=2;")?;
+        CREATE TABLE IF NOT EXISTS image_workflows (id TEXT PRIMARY KEY, json TEXT NOT NULL);")?;
         c.execute("UPDATE jobs SET status='queued', error='Återställd efter avbruten körning', started_at=NULL WHERE status='running'", [])?;
+        if version < 3 {
+            db.migrate_legacy_workflow()?;
+        }
+        c.execute_batch("PRAGMA user_version=3")?;
         Ok(db)
     }
     pub fn connect(&self) -> Result<Connection> {

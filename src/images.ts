@@ -3,11 +3,13 @@ import { invoke, convertFileSrc, isTauri } from '@tauri-apps/api/core';
 export interface ComfySettings {
   url: string; workflow: Record<string, { class_type: string; inputs: Record<string, unknown>; _meta?: { title?: string } }>;
   workflow_name: string; node_id: string; input_name: string;
+  selected_workflow_id: string | null; comfy_directory: string; comfy_python_path: string;
 }
 export interface ImageDraft { prompt: string; source_text: string; recording_id: string | null; run_id: string | null }
 export interface GeneratedImage { path: string; node_id: string; filename: string; subfolder: string; image_type: string }
 export interface ImageJob { id: string; created_at: string; draft: ImageDraft; config: ComfySettings; status: string; prompt_id: string | null; error: string | null; images: GeneratedImage[]; release_pending: boolean }
-interface ImageSnapshot { settings: ComfySettings; draft: ImageDraft; jobs: ImageJob[] }
+export interface SavedWorkflow { id: string; name: string; workflow: ComfySettings['workflow']; node_id: string; input_name: string }
+interface ImageSnapshot { workflows: SavedWorkflow[]; settings: ComfySettings; draft: ImageDraft; jobs: ImageJob[] }
 export const emptyDraft = (): ImageDraft => ({ prompt: '', source_text: '', recording_id: null, run_id: null });
 export const escapeHtml = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 export function workflowFields(workflow: unknown): { node: string; input: string; title: string }[] {
@@ -33,7 +35,8 @@ export class ImagesView {
   private persistedVersion = 0;
   private saving: Promise<void> | null = null;
   private saveTimer: ReturnType<typeof setTimeout> | undefined;
-  private setup: ComfySettings | null = null;
+  private workflowChanging = false;
+  private serverStarting = false;
   private visible = false;
   private creating = false;
   private readonly esc = escapeHtml;
@@ -46,8 +49,11 @@ export class ImagesView {
     this.snapshot = snapshot;
     if (this.visible) {
       if (!this.container.querySelector('#image-prompt')) this.render();
+      this.renderWorkflows();
       this.renderJobs();
+      this.updateCreateButton();
     }
+    await this.refreshServerStatus();
   }
   show() { this.visible = true; this.render(); }
   hide() { this.visible = false; void this.persist().catch(e => this.notify(String(e), true)); }
@@ -78,10 +84,11 @@ export class ImagesView {
   private render() {
     const esc = this.esc;
     this.container.innerHTML = `<div class="page-heading"><div><div class="eyebrow">FRÅN ORD TILL BILD</div><h1>Bilder</h1><p>Markera text i ett transkript eller skriv en egen bildprompt.</p></div></div>
+      <section id="workflow-library" class="settings-card workflow-library"></section>
       <div class="settings-card image-editor"><label for="image-prompt">Bildprompt</label><textarea id="image-prompt" rows="7" placeholder="Beskriv bilden du vill skapa…">${esc(this.draft.prompt)}</textarea>
       <p id="image-source" class="muted">${this.draft.recording_id ? 'Utkast från ett transkript. Ändringar här påverkar inte transkriptet.' : 'Fristående bildprompt.'}</p>
       <div class="device-actions"><button id="generate-image" class="primary">Skapa bild</button><button id="clear-image-draft" class="secondary">Nytt utkast</button></div>
-      <p class="muted">${this.snapshot?.settings.workflow_name ? `Workflow: ${esc(this.snapshot.settings.workflow_name)}. Whisper lämnar plats åt bildskapandet på GPU:n.` : 'Importera ditt ComfyUI-workflow och välj promptfält under Inställningar först.'}</p></div>
+      <p class="muted">Whisper lämnar plats åt bildskapandet på GPU:n. ComfyUI kan startas under Inställningar.</p></div>
       <div id="image-jobs" aria-live="polite"></div>`;
     const input = this.container.querySelector<HTMLTextAreaElement>('#image-prompt')!;
     input.oninput = () => { this.draft.prompt = input.value; this.change(); this.updateCreateButton(); };
@@ -90,20 +97,22 @@ export class ImagesView {
       if (this.draft.prompt.trim() && !window.confirm('Rensa bildutkastet? Sparade bilder finns kvar.')) return;
       this.draft = emptyDraft(); this.change(); this.render();
     };
+    this.renderWorkflows();
     this.updateCreateButton();
     this.renderJobs();
   }
   private updateCreateButton() {
     const button = this.container.querySelector<HTMLButtonElement>('#generate-image');
-    if (button) button.disabled = this.creating || !isTauri() || !this.draft.prompt.trim() || !this.snapshot?.settings.node_id;
+    if (button) button.disabled = this.creating || this.workflowChanging || !isTauri() || !this.draft.prompt.trim() || !this.snapshot?.workflows?.some(w => w.id === this.snapshot?.settings.selected_workflow_id);
   }
   private async create() {
-    if (this.creating) return;
+    if (this.creating || this.workflowChanging) return;
     this.creating = true;
     const draft = { ...this.draft };
+    const workflowId = this.snapshot?.settings.selected_workflow_id;
     const button = this.container.querySelector<HTMLButtonElement>('#generate-image')!;
     button.disabled = true;
-    try { await this.persist(); await invoke('create_image', { draft }); this.notify('Bildjobbet har lagts i kön.'); await this.refresh(); }
+    try { await this.persist(); await invoke('create_image', { draft, workflowId }); this.notify('Bildjobbet har lagts i kön.'); await this.refresh(); }
     catch (e) { this.notify(String(e), true); }
     finally { this.creating = false; this.updateCreateButton(); }
   }
@@ -150,46 +159,92 @@ export class ImagesView {
       document.body.append(dialog); dialog.showModal();
     });
   }
-  showSettings() {
-    const container = this.configContainer(); if (!container) return;
-    this.setup = structuredClone(this.snapshot?.settings ?? { url: 'http://127.0.0.1:8188', workflow: {}, workflow_name: '', node_id: '', input_name: '' });
-    const esc = this.esc;
-    container.innerHTML = `<h2>ComfyUI – bildskapande</h2><p>Starta ComfyUI separat och importera ett workflow exporterat i API-format.</p><label>ComfyUI-adress<input id="comfy-url" value="${esc(this.setup.url)}" spellcheck="false" /></label><button type="button" id="comfy-test" class="secondary">Testa anslutning</button><label>Workflow i API-format<input id="comfy-workflow" type="file" accept=".json,application/json" /></label><p id="comfy-workflow-name" class="muted">${esc(this.setup.workflow_name || 'Inget workflow importerat')}</p><label>Fält som ska få bildprompten<select id="comfy-field"></select><small>Välj textfältet för positiv prompt. Negativ prompt och övriga workflow-inställningar behålls.</small></label><button type="button" id="comfy-save" class="primary">Spara bildinställningar</button>`;
-    this.renderFields();
-    container.querySelector<HTMLInputElement>('#comfy-workflow')!.onchange = event => void (async () => {
+  private renderWorkflows() {
+    const target = this.container.querySelector<HTMLElement>('#workflow-library'); if (!target) return;
+    const workflows = this.snapshot?.workflows ?? [];
+    const selected = this.snapshot?.settings.selected_workflow_id;
+    const signature = JSON.stringify([workflows, selected]);
+    if (target.dataset.rendered === signature) return;
+    target.dataset.rendered = signature;
+    target.innerHTML = `<div class="image-job-head"><h2>Mina flöden</h2><button id="add-workflow" class="secondary">Lägg till flöde</button></div><label>Flöde för nästa bild<select id="workflow-choice"><option value="">Välj ett sparat flöde…</option>${workflows.map(w => `<option value="${this.esc(w.id)}" ${w.id === selected ? 'selected' : ''}>${this.esc(w.name)}</option>`).join('')}</select></label><div class="device-actions"><button id="edit-workflow" class="text-button" ${selected ? '' : 'disabled'}>Ändra namn / promptfält</button></div><p class="muted">Varje flöde behåller modell, bildstorlek, negativa promptar och övriga egenskaper från sin API-JSON. Flöden sparas lokalt och finns kvar efter omstart.</p>`;
+    target.querySelector<HTMLButtonElement>('#add-workflow')!.onclick = () => this.editWorkflow();
+    target.querySelector<HTMLButtonElement>('#edit-workflow')!.onclick = () => this.editWorkflow(workflows.find(w => w.id === selected));
+    target.querySelector<HTMLSelectElement>('#workflow-choice')!.onchange = event => void (async () => {
+      const id = (event.target as HTMLSelectElement).value;
+      if (!id || this.workflowChanging) { target.dataset.rendered = ''; this.renderWorkflows(); return; }
+      this.workflowChanging = true; this.updateCreateButton();
+      (event.target as HTMLSelectElement).disabled = true;
+      try { await invoke('select_workflow', { id }); await this.refresh(); }
+      catch (e) { this.notify(String(e), true); }
+      finally { this.workflowChanging = false; target.dataset.rendered = ''; this.renderWorkflows(); this.updateCreateButton(); }
+    })();
+  }
+  private editWorkflow(existing?: SavedWorkflow) {
+    let workflow = existing ? structuredClone(existing.workflow) : null;
+    const dialog = document.createElement('dialog');
+    dialog.innerHTML = `<form class="workflow-form"><h2>${existing ? 'Ändra sparat flöde' : 'Lägg till ComfyUI-flöde'}</h2><label>Namn<input id="workflow-name" maxlength="120" required value="${this.esc(existing?.name ?? '')}" placeholder="Exempel: Foto, illustration eller landskap" /></label><label>JSON i API-format<input id="workflow-file" type="file" accept=".json,application/json" ${existing ? '' : 'required'} /></label><small>Exportera i API-format från ComfyUI. ${existing ? 'Välj en ny fil om du vill ersätta detta flöde.' : ''}</small><label>Textfält för bildprompten<select id="workflow-input" required></select></label><div class="dialog-actions"><button type="button" class="secondary" id="workflow-cancel">Avbryt</button><button type="submit" class="primary">Spara flöde</button></div></form>`;
+    const fields = () => {
+      const select = dialog.querySelector<HTMLSelectElement>('#workflow-input')!;
+      select.innerHTML = '<option value="">Välj promptfält…</option>' + (workflow ? workflowFields(workflow) : []).map(f => `<option value="${this.esc(JSON.stringify({ node: f.node, input: f.input }))}" ${existing && f.node === existing.node_id && f.input === existing.input_name ? 'selected' : ''}>${this.esc(f.title)}</option>`).join('');
+    };
+    fields();
+    dialog.querySelector<HTMLInputElement>('#workflow-file')!.onchange = event => void (async () => {
       const file = (event.target as HTMLInputElement).files?.[0]; if (!file) return;
       try {
         if (file.size > 5 * 1024 * 1024) throw new Error('Workflow-filen är större än 5 MB.');
-        const workflow = JSON.parse(await file.text());
-        const fields = workflowFields(workflow);
-        if (!fields.length) throw new Error('Workflow saknar redigerbara textfält.');
-        this.setup!.workflow = workflow; this.setup!.workflow_name = file.name;
-        this.setup!.node_id = ''; this.setup!.input_name = '';
-        container.querySelector('#comfy-workflow-name')!.textContent = file.name;
-        this.renderFields();
-      } catch (e) { this.notify(String(e), true); }
+        const imported = JSON.parse(await file.text());
+        if (!workflowFields(imported).length) throw new Error('Workflow saknar redigerbara textfält.');
+        workflow = imported;
+        const name = dialog.querySelector<HTMLInputElement>('#workflow-name')!;
+        if (!name.value.trim()) name.value = file.name.replace(/\.json$/i, '');
+        fields();
+      } catch (e) { workflow = existing ? structuredClone(existing.workflow) : null; fields(); this.notify(String(e), true); }
+    })();
+    dialog.querySelector('#workflow-cancel')!.addEventListener('click', () => dialog.close());
+    dialog.onclose = () => dialog.remove();
+    dialog.querySelector('form')!.onsubmit = event => { event.preventDefault(); void (async () => {
+      const button = dialog.querySelector<HTMLButtonElement>('button[type=submit]')!; button.disabled = true;
+      try {
+        const field = JSON.parse(dialog.querySelector<HTMLSelectElement>('#workflow-input')!.value || 'null');
+        if (!workflow || !field) throw new Error('Importera API-JSON och välj promptfält.');
+        await invoke('save_workflow', { workflow: { id: existing?.id ?? '', name: dialog.querySelector<HTMLInputElement>('#workflow-name')!.value.trim(), workflow, node_id: field.node, input_name: field.input } });
+        dialog.close(); await this.refresh(); this.notify('Flödet är sparat och valt för nästa bild.');
+      } catch (e) { this.notify(String(e), true); button.disabled = false; }
+    })(); };
+    document.body.append(dialog); dialog.showModal();
+  }
+  showSettings() {
+    const container = this.configContainer(); if (!container) return;
+    const settings = this.snapshot?.settings;
+    container.innerHTML = `<h2>ComfyUI – server</h2><p>Dina bildflöden importeras och väljs under Bilder.</p><label>ComfyUI-adress<input id="comfy-url" value="${this.esc(settings?.url ?? 'http://127.0.0.1:8188')}" spellcheck="false" /></label><label>ComfyUI-mapp<input id="comfy-directory" value="${this.esc(settings?.comfy_directory)}" placeholder="/home/ditt-namn/comfy/ComfyUI" spellcheck="false" /></label><label>ComfyUI:s Pythonprogram<input id="comfy-python" value="${this.esc(settings?.comfy_python_path)}" placeholder="/home/ditt-namn/comfy/ComfyUI/.venv/bin/python" spellcheck="false" /></label><div class="device-actions"><button id="comfy-start" class="primary">Starta ComfyUI-server</button><button id="comfy-test" class="secondary">Testa anslutning</button><button id="comfy-save" class="secondary">Spara serverinställningar</button></div><p id="comfy-server-status" role="status" class="muted"></p><small>Servern startas lokalt utan att öppna webbläsaren. En server startad av DreamWhisper avslutas när du väljer Avsluta i systemfältet. En server du startat separat återanvänds.</small>`;
+    const connection = () => ({ url: container.querySelector<HTMLInputElement>('#comfy-url')!.value.trim(), comfy_directory: container.querySelector<HTMLInputElement>('#comfy-directory')!.value.trim(), comfy_python_path: container.querySelector<HTMLInputElement>('#comfy-python')!.value.trim() });
+    container.querySelector<HTMLButtonElement>('#comfy-save')!.onclick = () => void (async () => {
+      try { await invoke('save_comfy_connection', { settings: connection() }); await this.refresh(); this.notify('Serverinställningar sparade.'); }
+      catch (e) { this.notify(String(e), true); }
+    })();
+    container.querySelector<HTMLButtonElement>('#comfy-start')!.onclick = () => void (async () => {
+      if (this.serverStarting) return;
+      this.serverStarting = true; container.querySelector<HTMLButtonElement>('#comfy-start')!.disabled = true;
+      try { await invoke('save_comfy_connection', { settings: connection() }); await invoke('start_comfy_server'); await this.refresh(); }
+      catch (e) { this.notify(String(e), true); }
+      finally { this.serverStarting = false; await this.refreshServerStatus(); }
     })();
     container.querySelector<HTMLButtonElement>('#comfy-test')!.onclick = () => void (async () => {
       const button = container.querySelector<HTMLButtonElement>('#comfy-test')!; button.disabled = true;
-      try { await invoke('test_comfy_connection', { url: container.querySelector<HTMLInputElement>('#comfy-url')!.value.trim() }); this.notify('Anslutningen till ComfyUI fungerar.'); }
+      try { await invoke('test_comfy_connection', { url: connection().url }); this.notify('Anslutningen till ComfyUI fungerar.'); }
       catch (e) { this.notify(String(e), true); } finally { button.disabled = false; }
     })();
-    container.querySelector<HTMLButtonElement>('#comfy-save')!.onclick = () => void (async () => {
-      const button = container.querySelector<HTMLButtonElement>('#comfy-save')!; button.disabled = true;
-      try {
-        const selection = JSON.parse(container.querySelector<HTMLSelectElement>('#comfy-field')!.value || 'null');
-        if (!selection) throw new Error('Välj vilket textfält som ska få prompten.');
-        this.setup!.url = container.querySelector<HTMLInputElement>('#comfy-url')!.value.trim();
-        this.setup!.node_id = selection.node; this.setup!.input_name = selection.input;
-        await invoke('save_comfy_settings', { settings: this.setup });
-        await this.refresh(); this.notify('Bildinställningar sparade.');
-      } catch (e) { this.notify(String(e), true); } finally { button.disabled = false; }
-    })();
+    void this.refreshServerStatus();
   }
-  private renderFields() {
-    const select = this.configContainer()?.querySelector<HTMLSelectElement>('#comfy-field'); if (!select || !this.setup) return;
-    let fields: ReturnType<typeof workflowFields> = [];
-    if (Object.keys(this.setup.workflow).length) fields = workflowFields(this.setup.workflow);
-    select.innerHTML = '<option value="">Välj promptfält…</option>' + fields.map(field => `<option value="${this.esc(JSON.stringify({ node: field.node, input: field.input }))}" ${field.node === this.setup!.node_id && field.input === this.setup!.input_name ? 'selected' : ''}>${this.esc(field.title)}</option>`).join('');
+  private async refreshServerStatus() {
+    const container = this.configContainer();
+    const text = container?.querySelector<HTMLElement>('#comfy-server-status');
+    if (!text || !isTauri()) return;
+    try {
+      const server = await invoke<{ status: string; error: string | null; url: string; log_path: string }>('comfy_server_status');
+      text.textContent = server.error ?? ({ starting: 'ComfyUI startar …', running: `ComfyUI kör på ${server.url}`, external: `En befintlig ComfyUI-server kör på ${server.url}`, stopped: 'Servern har avslutats.' } as Record<string, string>)[server.status] ?? 'Servern är inte startad av DreamWhisper.';
+      if (server.log_path) text.textContent += ` Logg: ${server.log_path}`;
+      container!.querySelector<HTMLButtonElement>('#comfy-start')!.disabled = this.serverStarting || ['starting', 'running'].includes(server.status);
+    } catch (e) { text.textContent = String(e); }
   }
 }
