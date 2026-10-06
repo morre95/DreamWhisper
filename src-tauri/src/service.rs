@@ -118,10 +118,22 @@ impl Service {
             .find(|d| d.id == id)
             .context("Diktafonen är inte längre ansluten")?;
         let mount = devices::mount(&d.block_path)?;
-        self.import(
-            &PathBuf::from(mount).join("PRIVATE/SONY/REC_FILE"),
-            Some(&d.id),
-        )
+        let directories = devices::recording_directories(Path::new(&mount))?;
+        let _guard = self.importing.lock().unwrap();
+        let mut report = ImportReport::default();
+        for directory in directories {
+            let imported =
+                archive::import_directory(&self.db, &self.root, &directory, Some(&d.id))?;
+            report.imported += imported.imported;
+            report.skipped += imported.skipped;
+            report.errors.extend(imported.errors);
+        }
+        self.runtime.lock().unwrap().last_import = Some(ImportReport {
+            imported: report.imported,
+            skipped: report.skipped,
+            errors: report.errors.clone(),
+        });
+        Ok(report)
     }
     pub fn shutdown(&self) {
         self.stop.store(true, Ordering::Relaxed);

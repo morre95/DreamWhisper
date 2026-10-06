@@ -13,6 +13,8 @@ npm run desktop
 
 Appen fungerar som ljudarkiv innan transkribering konfigurerats. `npm run dev` öppnar enbart en webbförhandsvisning; USB, import och SQLite kräver Tauriappen.
 
+På NVIDIA med Wayland aktiverar appen automatiskt `WEBKIT_DISABLE_DMABUF_RENDERER=1` innan GTK/WebKit startas. Detta kringgår det dokumenterade [WebKitGTK-felet med Gdk Error 71](https://v2.tauri.app/develop/debug/linux-graphics/), med en långsammare renderingsväg för gränssnittet. CUDA-transkriberingen påverkas inte. En explicit inställning av variabeln respekteras, exempelvis `WEBKIT_DISABLE_DMABUF_RENDERER=0 npm run desktop` för att prova standardrenderingen efter en drivrutinsuppdatering.
+
 När fönstret stängs ligger appen kvar i systemfältet och importerar i bakgrunden. Välj **Öppna DreamWhisper** eller **Avsluta** i ikonens meny. Kör en enda instans per arkiv. I en byggd app kan du aktivera **Starta i systemfältet vid inloggning** under Inställningar. Det skapar appens egen XDG-autostartfil och startar med `--background`. Funktionen kräver att skrivbordsmiljön följer XDG-autostart; den aktiveras inte av implementationen eller installationen. Utvecklingsläget med Vite kan inte användas för autostart.
 
 ## Installera transkribering
@@ -48,7 +50,7 @@ Installationsskriptet använder `worker/requirements-linux-py312.lock`, som lås
 
 1. Anslut diktafonen via USB.
 2. Öppna **Diktafon** och välj **Registrera diktafon**.
-3. Appen importerar WAV/MP3 från `PRIVATE/SONY/REC_FILE` och alla undermappar. Även volymer med minneskort kan visas.
+3. Appen importerar WAV/MP3 från `REC_FILE` i volymens rot eller `PRIVATE/SONY/REC_FILE` och alla undermappar. Om båda inspelningsmapparna finns läses båda. `MUSIC` importeras inte. Även volymer med minneskort kan visas.
 4. Vid återanslutning importeras ej arkiverat innehåll; datum används inte för att avgöra vad som är nytt.
 
 Upptäckten använder UDisks2 `GetManagedObjects`, USB-/modellinformation, serienummer, volym-ID och Sony-mappstrukturen. Den lyssnar på UDisks2-signaler och inventerar dessutom var femte sekund för att återhämta missade händelser. En redan ansluten diktafon hittas vid appstart. Registrering med serienummer omfattar volymer på samma enhet. Saknas serienummer används volym-ID. Den fysiska ICD-UX570-enhetens identifierare behöver verifieras på din dator.

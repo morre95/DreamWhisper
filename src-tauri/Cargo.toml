@@ -19,7 +19,7 @@ desktop = ["dep:tauri", "dep:tauri-build"]
 custom-protocol = ["tauri/custom-protocol"]
 
 [build-dependencies]
-tauri-build = { version = "2", optional = true }
+tauri-build = { version = "2", optional = true , features = [] }
 
 [dependencies]
 anyhow = "1"

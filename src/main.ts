@@ -170,7 +170,7 @@ function renderDevices() {
   if (!state) return;
   $('#devices-page').innerHTML = `<div class="page-heading"><div><div class="eyebrow">AUTOMATISK IMPORT</div><h1>Din diktafon</h1><p>Anslut Sony ICD-UX570 via USB och registrera den för automatisk import.</p></div></div>
     <div class="device-grid">${state.devices.length ? state.devices.map(deviceCard).join('') : '<div class="settings-card"><span class="empty-icon">' + icons.device + '</span><h2>Väntar på din diktafon</h2><p>Anslut diktafonen till en USB-port. Du kan också importera en mapp från biblioteket.</p></div>'}</div>
-    <p class="muted">Appen läser PRIVATE/SONY/REC_FILE och bevarar originalen på diktafonen. Import fortsätter när en registrerad enhet ansluts igen.</p>`;
+    <p class="muted">Appen hittar REC_FILE i roten eller under PRIVATE/SONY och bevarar originalen på diktafonen. Import fortsätter när en registrerad enhet ansluts igen.</p>`;
   document.querySelectorAll<HTMLButtonElement>('[data-register]').forEach(b => b.onclick = () => void action(async () => { await invoke('register_device', { id: b.dataset.register }); toast('Diktafonen är registrerad'); await refresh(); }));
   document.querySelectorAll<HTMLButtonElement>('[data-unregister]').forEach(b => b.onclick = () => void action(async () => { await invoke('unregister_device', { id: b.dataset.unregister }); await refresh(); }));
   document.querySelectorAll<HTMLButtonElement>('[data-import-device]').forEach(b => b.onclick = () => void action(async () => {
