@@ -3,6 +3,7 @@ dist/
 src-tauri/target/
 .venv/
 models/
+.local/
 __pycache__/
 *.pyc
 .pytest_cache/

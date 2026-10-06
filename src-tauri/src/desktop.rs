@@ -230,6 +230,105 @@ fn export_transcript(
     Ok(path.to_string_lossy().into())
 }
 
+#[tauri::command]
+fn journal_snapshot(state: State<'_, AppState>) -> ApiResult<crate::journal::JournalSnapshot> {
+    state.db.journal_snapshot().map_err(err)
+}
+#[tauri::command]
+fn save_journal_entry(
+    state: State<'_, AppState>,
+    input: crate::journal::EntryInput,
+) -> ApiResult<crate::journal::JournalEntry> {
+    state.db.save_journal_entry(input).map_err(err)
+}
+#[tauri::command]
+fn confirm_description(
+    state: State<'_, AppState>,
+    id: String,
+    revision: String,
+) -> ApiResult<crate::journal::JournalEntry> {
+    state.db.confirm_description(&id, &revision).map_err(err)
+}
+#[tauri::command]
+fn save_drafting_settings(
+    state: State<'_, AppState>,
+    settings: crate::journal::DraftingSettings,
+) -> ApiResult<()> {
+    state.db.save_drafting_settings(settings).map_err(err)
+}
+#[tauri::command]
+fn request_drafting(
+    state: State<'_, AppState>,
+    request_id: String,
+    entry_id: String,
+    revision: String,
+    include_reflections: bool,
+    scene_ids: Vec<String>,
+) -> ApiResult<String> {
+    state
+        .db
+        .request_drafting(
+            &request_id,
+            &entry_id,
+            &revision,
+            include_reflections,
+            scene_ids,
+        )
+        .map_err(err)
+}
+#[tauri::command]
+fn save_scene_draft(
+    state: State<'_, AppState>,
+    edit: crate::journal::DraftEdit,
+) -> ApiResult<crate::journal::SceneDraft> {
+    state.db.save_scene_draft(edit).map_err(err)
+}
+#[tauri::command]
+fn manual_scene(
+    state: State<'_, AppState>,
+    entry_id: String,
+    revision: String,
+    prompt: String,
+) -> ApiResult<crate::journal::SceneDraft> {
+    state
+        .db
+        .manual_scene(&entry_id, &revision, &prompt)
+        .map_err(err)
+}
+#[tauri::command]
+fn approve_scene(state: State<'_, AppState>, id: String) -> ApiResult<()> {
+    state.db.approve_scene(&id).map_err(err)
+}
+#[tauri::command]
+fn generate_journal_images(
+    state: State<'_, AppState>,
+    request_id: String,
+    entry_id: String,
+    draft_ids: Vec<String>,
+    workflow_id: String,
+) -> ApiResult<Vec<String>> {
+    state
+        .db
+        .generate_journal_images(&request_id, &entry_id, draft_ids, &workflow_id)
+        .map_err(err)
+}
+#[tauri::command]
+fn favourite_image(
+    state: State<'_, AppState>,
+    entry_id: String,
+    path: Option<String>,
+) -> ApiResult<crate::journal::JournalEntry> {
+    state.db.favourite_image(&entry_id, path).map_err(err)
+}
+#[tauri::command]
+fn set_recording_language(
+    state: State<'_, AppState>,
+    id: String,
+    language: String,
+) -> ApiResult<()> {
+    state.db.set_recording_language(&id, &language).map_err(err)
+}
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
@@ -288,6 +387,17 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            journal_snapshot,
+            save_journal_entry,
+            confirm_description,
+            save_drafting_settings,
+            request_drafting,
+            save_scene_draft,
+            manual_scene,
+            approve_scene,
+            generate_journal_images,
+            favourite_image,
+            set_recording_language,
             save_workflow,
             select_workflow,
             delete_workflow,

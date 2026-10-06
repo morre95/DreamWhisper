@@ -8,7 +8,7 @@ export interface ComfySettings {
 }
 export interface ImageDraft { prompt: string; negative_prompt: string | null; source_text: string; recording_id: string | null; run_id: string | null }
 export interface GeneratedImage { deleted?: boolean; created_at?: string | null; path: string; node_id: string; filename: string; subfolder: string; image_type: string }
-export interface ImageJob { id: string; created_at: string; draft: ImageDraft; config: ComfySettings; status: string; prompt_id: string | null; error: string | null; images: GeneratedImage[]; release_pending: boolean }
+export interface ImageJob { entry_id?: string | null; draft_revision_id?: string | null; id: string; created_at: string; draft: ImageDraft; config: ComfySettings; status: string; prompt_id: string | null; error: string | null; images: GeneratedImage[]; release_pending: boolean }
 export interface SavedWorkflow { id: string; name: string; workflow: ComfySettings['workflow']; node_id: string; input_name: string; negative_field: PromptField | null }
 interface ImageSnapshot { workflows: SavedWorkflow[]; settings: ComfySettings; draft: ImageDraft; jobs: ImageJob[] }
 export const emptyDraft = (): ImageDraft => ({ prompt: '', negative_prompt: null, source_text: '', recording_id: null, run_id: null });

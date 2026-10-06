@@ -106,6 +106,10 @@ pub struct GeneratedImage {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ImageJob {
+    #[serde(default)]
+    pub entry_id: Option<String>,
+    #[serde(default)]
+    pub draft_revision_id: Option<String>,
     pub id: String,
     pub created_at: String,
     pub draft: ImageDraft,
@@ -151,7 +155,7 @@ impl Database {
         }
         // Save the tombstone first so a crash or later follow-up cannot restore the image.
         image.deleted = true;
-        self.save_image_job(&job)?;
+        self.save_deleted_image(&job, path)?;
         match std::fs::remove_file(&file) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -315,9 +319,21 @@ impl Database {
     }
     pub fn enqueue_image_with_workflow(
         &self,
-        mut draft: ImageDraft,
+        draft: ImageDraft,
         workflow_id: Option<&str>,
     ) -> Result<String> {
+        let job = self.build_image_job(draft, workflow_id)?;
+        self.connect()?.execute(
+            "INSERT INTO image_jobs VALUES(?1,?2)",
+            rusqlite::params![job.id, serde_json::to_string(&job)?],
+        )?;
+        Ok(job.id)
+    }
+    pub(crate) fn build_image_job(
+        &self,
+        mut draft: ImageDraft,
+        workflow_id: Option<&str>,
+    ) -> Result<ImageJob> {
         if draft.prompt.trim().is_empty() {
             bail!("Skriv en bildprompt först.");
         }
@@ -373,6 +389,8 @@ impl Database {
             }
         }
         let job = ImageJob {
+            entry_id: None,
+            draft_revision_id: None,
             id: uuid::Uuid::new_v4().to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
             draft,
@@ -383,12 +401,7 @@ impl Database {
             images: vec![],
             release_pending: false,
         };
-        let c = self.connect()?;
-        c.execute(
-            "INSERT INTO image_jobs VALUES(?1,?2)",
-            rusqlite::params![job.id, serde_json::to_string(&job)?],
-        )?;
-        Ok(job.id)
+        Ok(job)
     }
     pub fn image_snapshot(&self) -> Result<ImageSnapshot> {
         Ok(ImageSnapshot {
@@ -555,6 +568,33 @@ fn queue_empty(queue: &Value) -> bool {
     ["queue_running", "queue_pending"]
         .iter()
         .all(|key| queue[*key].as_array().is_some_and(Vec::is_empty))
+}
+
+/// Before loading another local engine, release a reachable, idle ComfyUI instance.
+/// Refuse an occupied or unverifiable queue; never interrupt another client's work.
+pub fn release_idle_comfy(db: &Database) -> Result<()> {
+    let config = db.comfy_settings()?;
+    validate_url(&config.url)?;
+    let http = Client::builder()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    let response = match http.get(endpoint(&config, "/queue")).send() {
+        Ok(response) => response,
+        Err(error) if error.is_connect() => return Ok(()),
+        Err(_) => bail!("ComfyUI:s kö kunde inte kontrolleras. Försök igen när servern svarar."),
+    };
+    let queue = response_json(response)?;
+    anyhow::ensure!(
+        queue_empty(&queue),
+        "ComfyUI använder GPU:n. Vänta tills dess kö är tom och försök igen."
+    );
+    http.post(endpoint(&config, "/free"))
+        .json(&json!({"unload_models":true,"free_memory":true}))
+        .send()?
+        .error_for_status()?;
+    std::thread::sleep(Duration::from_secs(2));
+    Ok(())
 }
 
 /// One short supervisor tick. Never resubmits a job after a possibly accepted POST.
@@ -989,6 +1029,10 @@ mod tests {
     fn gpu_handoff_finishes_active_transcription_and_respects_manual_pause() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let service = crate::service::Service::open(temp.path().join("data"))?;
+        service.db.save_comfy_settings(&ComfySettings {
+            url: "http://127.0.0.1:0".into(),
+            ..Default::default()
+        })?;
         let script = temp.path().join("fake_worker.py");
         let pid_file = script.with_extension("pid");
         std::fs::write(
@@ -1049,6 +1093,8 @@ for line in sys.stdin:
         config.url = server.url.clone();
         config.workflow = build_prompt(&config, "en svensk skog")?;
         service.db.save_image_job(&ImageJob {
+            entry_id: None,
+            draft_revision_id: None,
             id,
             created_at: chrono::Utc::now().to_rfc3339(),
             draft: ImageDraft {
@@ -1376,7 +1422,7 @@ for line in sys.stdin:
             reopened
                 .connect()?
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))?,
-            3
+            4
         );
         Ok(())
     }

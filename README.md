@@ -1,6 +1,6 @@
 # DreamWhisper
 
-En Linuxapp för eget bruk som importerar Sony ICD-UX570-inspelningar, bevarar originalen och transkriberar svenska lokalt med KB-Whisper large.
+En personlig Linuxjournal som skapar bilder av beskrivna drömmar och meditationer. Skriv svenska eller engelska, eller importera Sony ICD-UX570-inspelningar. Original, transkript, reflektioner, scenutkast och bilder sparas lokalt.
 
 Licens: [MIT](LICENSE). Copyright © 2026 Erik Morén.
 
@@ -44,9 +44,50 @@ Modellhämtningen kräver internet och flera GB ledigt utrymme. Skriptet slår u
 
 I utvecklingsläge fylls sökvägarna automatiskt om projektets `.venv` och `models/kb-whisper-large` finns. Transkribering är fortfarande avstängd tills du aktiverar den.
 
-Workern kör offline och laddar inte ner modeller. Den håller modellen laddad och kör ett jobb åt gången med svenska, CUDA, FP16, VAD och ordtidsstämplar. Vid GPU-minnesbrist halveras batchstorleken ner till 1. Om en fil fortfarande misslyckas behålls den i arkivet med ett fel och kan köras om. En worker som inte kan startas tömmer inte arbetskön; åtgärda felet och välj **Starta om motorn** under Arbetskö. En paus träder i kraft efter den pågående inspelningen.
+Workern kör offline och laddar inte ner modeller. Välj svenska eller engelska på varje inspelning; svenska är standard. Den håller en modell laddad och kör ett jobb åt gången med det valda språket, CUDA, FP16, VAD och ordtidsstämplar. Vid GPU-minnesbrist halveras batchstorleken ner till 1. Om en fil fortfarande misslyckas behålls den i arkivet med ett fel och kan köras om. En worker som inte kan startas tömmer inte arbetskön; åtgärda felet och välj **Starta om motorn** under Arbetskö. En paus träder i kraft efter den pågående inspelningen.
 
 Installationsskriptet använder `worker/requirements-linux-py312.lock`, som låser de verifierade Pythonberoendena för Linux och Python 3.12. `worker/requirements.txt` beskriver beroendena för framtida uppdateringar. PyAV är låst till 17.1.0 eftersom faster-whisper 1.2.1 använder `metadata_errors`, som [PyAV 19 tog bort](https://github.com/PyAV-Org/PyAV/releases/tag/v19.0.0). Resultatens metadata innehåller den faktiska faster-whisper- och CTranslate2-versionen, modellrevisionen och batchstorleken.
+
+För engelska inspelningar hämtar du en separat modell en gång:
+
+```bash
+.venv/bin/python worker/prepare_model.py --model-id Systran/faster-whisper-large-v3 --output "$PWD/models/whisper-large-v3"
+```
+
+Ange mappen under **Inställningar → Engelsk modellmapp**. Välj **English** på inspelningen och välj **Ny transkribering** för att köra om en tidigare version. Tidigare transkript bevaras. Språket för ett pågående jobb kan inte ändras. Saknas den engelska modellen visas ett fel för det jobbet; svenska inspelningar kan fortfarande behandlas.
+
+## Journal: från upplevelse till bild
+
+1. Välj **Ny upplevelse** i Journal och ange titel, datum, dröm/meditation, språk och beskrivning. Datum är upplevelsens datum och kan ändras; ett inspelningsdatum gissas inte från filens ändringstid.
+2. Alternativt öppnar du en inspelning, fäller ut textmarkeringen och väljer **Journalpost av markering** eller **Journalpost av hela transkriptet**. Texten kopieras och källversionen länkas. Granska och rätta kopian och välj **Bekräfta den granskade beskrivningen** innan du skapar utkast.
+3. Skriv **Mina reflektioner** separat. De sparas med posten men används bara om du väljer **Ta med mina reflektioner i nästa utkast**. Detta är ett val för just nästa begäran.
+4. Välj **Skapa scenutkast**. Efter lokal bearbetning visas separata scener med sammanfattning, källcitat, kreativa tillägg och engelska bildpromptar. Omöjlig geometri och drömlika motsägelser ska bevaras. Citat är granskningshjälp, inte en garanti att modellen förstått korrekt.
+5. Redigera detaljer, tillägg, sammanfattningar eller prompten. Ta bort oönskade tillägg; om prompten är manuellt omskriven måste du även granska att tillägget försvunnit där. **Spara ny version** bevarar tidigare utkast. Varje ändrad version behöver godkännas igen.
+6. Välj ett av dina importerade ComfyUI-flöden och **Godkänn granskad prompt**. Generera en scen eller **Generera alla scener separat** efter att samtliga scenpromptar granskats. Flödets modell, seed, bildstorlek och övriga inställningar bevaras. En orörd negativ prompt använder flödets standard; ett uttryckligen tömt fält skickar en tom prompt om flödet stöder det.
+7. Markera minst två scener och välj **Kombinera valda scener**. Granska den nya kompositionen och förklaringen av hur scenerna passar ihop innan du godkänner och genererar. De individuella utkasten finns kvar.
+8. Bilder och försök sparas på posten med sina exakta promptar och workflow-kopior. Markera en favorit. Borttagning raderar bara den lokala bilden och avmarkerar den om den var favorit.
+
+Postens text autosparas. Utkastredigeringar sparas med **Spara ny version** och före navigering eller andra åtgärder. Osparade ändringar behålls i formuläret om lagringen misslyckas. Tidigare beskrivningar och utkast kan läsas i historiken. Utkast från en äldre beskrivning kan aldrig godkännas för den aktuella posten.
+
+Om språkmodellen inte kan starta eller ett utkast misslyckas bevaras beskrivning och tidigare utkast. Välj **Försök igen** eller **Skriv en egen scenprompt**. För långa beskrivningar avvisas med en uppmaning att välja ett kortare avsnitt; de kapas inte tyst. Ett pågående utkast markeras som avbrutet efter en omstart och kan köras om manuellt.
+
+## Installera lokal scenutkastning
+
+Kräver den befintliga Pythonmiljön, Git, CMake, en C/C++-kompilator och CUDA-toolkit med `nvcc` (utöver NVIDIA-drivrutinen). Kör explicit en gång:
+
+```bash
+bash scripts/setup-drafting.sh
+```
+
+Skriptet bygger en CUDA-aktiverad llama-server i `.local/llama.cpp/` och hämtar den officiella **Qwen3-8B Q4_K_M**-modellen, cirka 5 GB, till `models/qwen3-8b/`. Första installationen låser de upplösta källrevisionerna; upprepade körningar behåller dem. Runtime-revision, version och binärens SHA-256 sparas i `.local/llama-runtime.json`. Modellrevision och SHA-256 sparas i `dreamwhisper-text-model.json`. Byt mapp vid modellbyte. Workern kör enbart lokala filer och gör inga automatiska nedladdningar.
+
+Öppna **Inställningar → Lokal språkmodell för scenutkast** och kontrollera program- och modellsökvägarna. Utvecklingsläget förifyller projektets sökvägar; i en installerad app kan du behöva ange dem själv. Att filerna finns innebär inte att GPU-starten verifierats.
+
+llama-server startas bara av supervisorn, på en lokal adress med ett tillfälligt API-lösenord, 16 384 tokens kontext, en begäran åt gången och tänkande avstängt. Källdetaljer extraheras först; kreativa tillägg föreslås därefter separat för varje scen. Kombinationer bevarar redan granskade detaljer och tillägg och föreslår en konkret placering i samma bild. Processen avslutas och inväntas efter varje utkast. Talmodell, språkmodell och ComfyUI använder GPU:n i tur och ordning. Redan inskickade bildjobb följs upp och ComfyUI avlastas innan andra motorer startar. En upptagen extern ComfyUI-kö avbryts inte; väntan/avlastningsfel visas för återförsök. Samordningen förutsätter fortfarande att andra program inte samtidigt skickar nya GPU-jobb.
+
+Diagnostik finns i `logs/drafting.log`; journalens innehåll sparas i SQLite, inte avsiktligt i diagnostikloggen. Ingen molntjänst används. Symboliska metaforer, AI-tolkningar av betydelse och molnleverantörer ingår inte i denna första version.
+
+Säkerhetskopiera appdatamappen när appen är avslutad före uppgradering. Databasversion 4 bevarar befintliga inspelningar, transkript, flöden och bildhistorik. Äldre appversioner kan inte öppna den uppgraderade databasen. Befintliga bilder blir inte automatiskt journalposter.
 
 ## Importera från Sony
 
@@ -95,11 +136,11 @@ Säkerhetskopiera hela appdatamappen när appen är avslutad. Modellen och Pytho
 4. Öppna en inspelning och fäll ut **Markera text för en bild**. Markera text över ett eller flera stycken och välj **Skapa bild av markering**.
 5. I **Bilder** kan du skriva om eller komplettera prompten innan du väljer **Skapa bild**. Du kan också börja med en helt egen prompt. Under Bilder finns separata fält för positiv och negativ prompt. För ett tidigare sparat flöde väljer du negativt promptfält via **Ändra namn / promptfält**. Den negativa prompten förifylls från flödet tills du ändrar den; ett uttryckligen tömt fält skickar en tom negativ prompt. Båda promptarna sparas i utkast och bildhistorik. Bildprompten ändrar aldrig transkriptet.
 
-Promptutkast sparas lokalt. Varje bildjobb sparar källtext, redigerad prompt, eventuell inspelning/transkriptversion och en egen workflow-kopia. Bildgalleriet visar alla PNG/JPEG/WebP-resultat som workflow rapporterar; använd SaveImage eller PreviewImage. Klicka på en bild för större visning. Bilderna kopieras till appens `images/`-mapp och kan visas efter omstart även om ComfyUI är avstängt. Databasen migreras automatiskt till version 3 och ett tidigare konfigurerat workflow flyttas till Mina flöden; äldre appversioner kan inte öppna den uppgraderade databasen.
+Promptutkast sparas lokalt. Varje bildjobb sparar källtext, redigerad prompt, eventuell inspelning/transkriptversion och en egen workflow-kopia. Bildgalleriet visar alla PNG/JPEG/WebP-resultat som workflow rapporterar; använd SaveImage eller PreviewImage. Klicka på en bild för större visning. Bilderna kopieras till appens `images/`-mapp och kan visas efter omstart även om ComfyUI är avstängt. Databasen migreras automatiskt till version 4 och ett tidigare konfigurerat workflow flyttas till Mina flöden; äldre appversioner kan inte öppna den uppgraderade databasen.
 
 Whisper och bildjobben delar en supervisor: pågående transkribering slutförs, Whisper-processen avslutas och därefter skickas bildjobbet. När bildjobbet är avslutat väntar appen tills ComfyUI-kön är tom, begär modellavlastning via `/free` och låter Whisper återstarta om transkribering fortfarande är aktiverad. Avlastningen är asynkron; om Whisper inte kan återstarta visas felet i Arbetskö. En manuell paus respekteras. Samordningen förutsätter att andra program inte samtidigt skickar nya GPU-jobb till ComfyUI.
 
-Vid omstart eller nätverksfel följs redan skickade jobb upp via server-ID utan automatisk återsändning. **Följ upp / hämta igen** hämtar tidigare resultat utan ny bildkörning. Om servern inte längre går att nå kan **Avsluta uppföljning** användas efter att du kontrollerat att ComfyUI inte kör jobbet; detta avbryter inte jobbet i ComfyUI. Appen behöver en aktuell lokal ComfyUI som accepterar `prompt_id` i `/prompt` (den lokalt installerade serverkoden gör det). ComfyUI installeras inte av DreamWhisper. Startknappen kör installationens Pythonprogram och `main.py` på en lokal adress med webbläsarstart avstängd. Status visar när servern svarar; startfel finns i appdatamappens `logs/comfyui.log`. En redan körande server återanvänds. DreamWhisper avslutar endast sin egen server när appen avslutas via systemfältet; en separat startad server lämnas igång. Att bara stänga appfönstret avslutar inte servern. Ingen språkmodell eller automatisk översättning används.
+Vid omstart eller nätverksfel följs redan skickade jobb upp via server-ID utan automatisk återsändning. **Följ upp / hämta igen** hämtar tidigare resultat utan ny bildkörning. Om servern inte längre går att nå kan **Avsluta uppföljning** användas efter att du kontrollerat att ComfyUI inte kör jobbet; detta avbryter inte jobbet i ComfyUI. Appen behöver en aktuell lokal ComfyUI som accepterar `prompt_id` i `/prompt` (den lokalt installerade serverkoden gör det). ComfyUI installeras inte av DreamWhisper. Startknappen kör installationens Pythonprogram och `main.py` på en lokal adress med webbläsarstart avstängd. Status visar när servern svarar; startfel finns i appdatamappens `logs/comfyui.log`. En redan körande server återanvänds. DreamWhisper avslutar endast sin egen server när appen avslutas via systemfältet; en separat startad server lämnas igång. Att bara stänga appfönstret avslutar inte servern. Journalens lokala språkmodell skapar engelska bildpromptar efter separat installation enligt nedan. Fristående bildpromptar använder fortfarande dina egna texter.
 
 ## Testa och bygga
 
@@ -138,6 +179,8 @@ För att kontrollera GPU-kärnorna med syntetiskt ljud:
 - `src-tauri/src/db.rs`: SQLite, beständig kö och transkriptversioner.
 - `src-tauri/src/images.rs`: beständiga bildjobb, ComfyUI-API och lokalt bildarkiv.
 - `src/images.ts`: prompteditor, workflow-inställningar och bildgalleri.
+- `src/journal.ts` och `src-tauri/src/journal.rs`: journalposter, revisionshistorik, granskning och godkända bildjobb.
+- `src-tauri/src/drafting.rs`: lokal scenextraktion, separata kreativa tillägg och processlivscykel.
 - `src-tauri/src/devices.rs`: UDisks2 och enhetsidentifiering.
 - `src-tauri/src/service.rs`: bakgrundsimport och seriell arbetskö.
 - `src-tauri/src/worker.rs`: Pythonprocessens livscykel och JSON-protokoll.
@@ -145,12 +188,28 @@ För att kontrollera GPU-kärnorna med syntetiskt ljud:
 - `src-tauri/src/desktop.rs`: Tauri-kommandon, lokalt ljudprotokoll och systemfält.
 - `worker/`: modellhämtning och offline-transkribering.
 
-Verifierat på denna dator: desktopbygge, TypeScriptbygge, Clippy, 13 automatiska tester, UDisks2-anrop och import → SQLite-kö → lokal KB-Whisper large CUDA FP16 → resultatlagring med en tyst 3-sekunders WAV på RTX 3090 (24 GB). Tyst ljud gav korrekt noll textsegment med VAD. Ett separat test med ett explicit ljudfönster verifierade också GPU-inferens och ordtidsstämpling i FP16; det testet mäter inte taligenkänningens kvalitet. Modellrevision: `d5d5984b4d8f7c4847a8ea203f1976285fb28300`.
+Verifierat på denna dator: desktopbygge, TypeScriptbygge, Clippy och 69 automatiska tester (46 Rust, 6 Python och 17 TypeScript/JavaScript). Native-gränssnittet har startats och granskats i ett isolerat testarkiv. Den lokala Qwen3-8B-modellen och CUDA-runtime är installerade och verifierade på RTX 3090 (24 GB). Svenska och engelska syntetiska beskrivningar gav två separata scener på cirka 7–9 sekunder, med engelska promptar och granskningsmaterial på respektive språk. Ett verkligt GPU-test kombinerade scenerna i en föreslagen vänster/höger-komposition och behöll källdetaljerna. Dessa tester verifierar körningen, inte bildkvaliteten.
 
-Återstår för validering: fysisk Sony-anslutning, dess volymidentifierare, svenska talinspelningar, ordtidsstämplarnas kvalitet och visuell kontroll av native-gränssnittet. Ingen diktafon eller automatiserbar GUI-session fanns tillgänglig under implementationen. Nästa förbättringar är grafisk mappväljare, valbar arkivplats och exaktare inspelningsdatum från Sony-filnamn.
+Tidigare verifierades import → SQLite-kö → lokal KB-Whisper large CUDA FP16 → resultatlagring med en tyst 3-sekunders WAV. Tyst ljud gav noll textsegment med VAD. Ett separat test med ett explicit ljudfönster verifierade GPU-inferens och ordtidsstämpling; det mäter inte taligenkänningens kvalitet. Den engelska large-v3-modellen är också installerad, men dess taligenkänningskvalitet återstår att bedöma.
+
+Återstår för användarvalidering: de fem egna upplevelsernas bilder, riktiga svenska/engelska talinspelningar, ordtidsstämplarnas kvalitet och fysisk Sony-anslutning med dess volymidentifierare. Symboliskt läge kommer efter att det första journalflödet klarat acceptanstestet.
 
 Arbetskö visar pågående och väntande inspelningar i behandlingsordning samt misslyckade jobb med felorsak. Välj **Starta kön** för att aktivera transkribering; **Pausa kön** stoppar efter pågående inspelning. Försök igen köar om filen och bevarar tidigare transkript, men aktiverar inte en pausad kö. Vid fel när modellen laddas kan du korrigera inställningarna och välja **Starta om motorn**.
 
 Under **Inställningar → Sparade bildflöden** kan du ta bort flöden. Bildhistorik, sparade bilder och redan köade jobb behåller sina workflow-kopior. Om det valda flödet tas bort väljs nästa sparade flöde (eller det föregående om det var sist).
 
 Bilder visar de fem senaste enskilda bilderna, och varje bildjobb visar sina egna bilder. Under **Galleri** finns alla sparade bilder med de senaste först. **Ta bort bild** raderar den lokala kopian efter bekräftelse; ComfyUI-originalet och övriga bilder i samma jobb behålls. Borttagna bilder hämtas inte tillbaka vid uppföljning av jobbet.
+
+## Validera journalflödet
+
+Automatiska tester använder även en lokal CPU-testserver för att kontrollera strukturerade språkmodellsvar, språkval, för stora indata, startfel, avstängning och processavslut. De verifierar inte bildlikhet eller taligenkänningens kvalitet.
+
+Efter installation kan du prova verklig GPU-utkastning med en egen textfil i ett isolerat temporärt arkiv:
+
+```bash
+cargo run --manifest-path src-tauri/Cargo.toml --no-default-features --example draft -- "$PWD/.local/llama.cpp/build/bin/llama-server" "$PWD/models/qwen3-8b/Qwen3-8B-Q4_K_M.gguf" sv /full/sökväg/beskrivning.txt
+```
+
+Använd `en` för engelska och lägg till `--combine` för att även prova en kombinerad komposition. Diagnostikexemplet skriver ut de genererade scenutkasten och ändrar inte ditt vanliga arkiv.
+
+Produktens acceptanstest är fem riktiga drömmar eller meditationer, med både språk, ljud/text och flera scener representerade. Anteckna viktiga detaljer före generation. Minst fyra ska ge en bild du vill spara, med detaljerna bevarade och högst en större promptomskrivning per upplevelse. Bedöm symboliskt läge separat när det senare implementeras.

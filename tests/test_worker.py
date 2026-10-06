@@ -28,6 +28,14 @@ class WorkerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 worker.validated_request(value)
 
+    def test_language_validation_and_legacy_default(self):
+        with tempfile.NamedTemporaryFile() as audio:
+            request = {"type": "transcribe", "job_id": "job", "path": audio.name}
+            self.assertEqual(worker.validated_request(request)[2], "sv")
+            self.assertEqual(worker.validated_request({**request, "language": "en"})[2], "en")
+            with self.assertRaises(ValueError):
+                worker.validated_request({**request, "language": "de"})
+
     def test_oom_detection(self):
         self.assertTrue(worker.is_oom(RuntimeError("CUDA failed with out of memory")))
         self.assertFalse(worker.is_oom(RuntimeError("file unreadable")))
@@ -58,16 +66,16 @@ class WhisperModel:
 class BatchedInferencePipeline:
     def __init__(self, model): pass
     def transcribe(self, path, **kwargs):
-        assert kwargs['language'] == 'sv'
+        assert kwargs['language'] in ('sv', 'en')
         assert kwargs['word_timestamps'] is True
         if kwargs['batch_size'] > 2: raise RuntimeError('CUDA out of memory')
-        return iter([N(start=0.0, end=1.0, text='Hej världen', words=[N(start=0.0, end=1.0, word='Hej', probability=.9)])]), N(duration=1.0)
+        return iter([N(start=0.0, end=1.0, text='Hej världen' if kwargs['language'] == 'sv' else 'Hello world', words=[N(start=0.0, end=1.0, word='Hej', probability=.9)])]), N(duration=1.0)
 ''')
             for package in ("faster_whisper", "ctranslate2"):
                 dist = base / f"{package}-1.0.dist-info"
                 dist.mkdir()
                 (dist / "METADATA").write_text(f"Name: {package.replace('_', '-')}\nVersion: 1.0\n")
-            requests = [{"type": "transcribe", "job_id": f"job-{i}", "path": str(audio)} for i in (1, 2)]
+            requests = [{"type": "transcribe", "job_id": f"job-{i}", "path": str(audio), "language": "sv" if i == 1 else "en"} for i in (1, 2)]
             requests.append({"type": "shutdown"})
             env = {**os.environ, "PYTHONPATH": str(base)}
             result = subprocess.run([sys.executable, str(ROOT / "worker" / "worker.py"), "--model", str(model)],
@@ -81,6 +89,8 @@ class BatchedInferencePipeline:
             self.assertEqual(completed[0]["metadata"]["batch_size"], 2)
             self.assertEqual(completed[0]["segments"][0]["text"], "Hej världen")
             self.assertEqual(completed[0]["metadata"]["model"]["revision"], "abc")
+            self.assertEqual(completed[1]["metadata"]["language"], "en")
+            self.assertEqual(completed[1]["segments"][0]["text"], "Hello world")
 
 
 if __name__ == "__main__":

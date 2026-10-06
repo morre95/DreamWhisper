@@ -1,5 +1,5 @@
 export interface Settings {
-  python_path: string; model_path: string; batch_size: number;
+  python_path: string; model_path: string; english_model_path: string; batch_size: number;
   auto_import: boolean; transcription_enabled: boolean;
   start_at_login: boolean;
 }
@@ -10,7 +10,7 @@ export interface Device {
 export interface Recording {
   id: string; name: string; archive_path: string; sha256: string; size: number;
   source_modified_at: string | null; imported_at: string; status: string;
-  error: string | null; attempts: number; duration: number | null;
+  error: string | null; attempts: number; duration: number | null; language: 'sv' | 'en';
 }
 export interface Segment {
   id: number; start: number; end: number; text: string; edited_text: string | null;

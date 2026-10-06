@@ -116,7 +116,7 @@ impl Worker {
         writeln!(
             self.stdin,
             "{}",
-            serde_json::json!({"type":"transcribe","job_id":job.id,"path":job.path})
+            serde_json::json!({"type":"transcribe","job_id":job.id,"path":job.path,"language":job.language})
         )?;
         self.stdin.flush()?;
         let started = Instant::now();

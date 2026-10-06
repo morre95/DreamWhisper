@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 pub struct Settings {
     pub python_path: String,
     pub model_path: String,
+    #[serde(default)]
+    pub english_model_path: String,
     pub batch_size: u32,
     pub auto_import: bool,
     pub transcription_enabled: bool,
@@ -31,6 +33,10 @@ impl Settings {
                     .to_string_lossy()
                     .into()
             },
+            english_model_path: project
+                .join("models/whisper-large-v3")
+                .to_string_lossy()
+                .into(),
             batch_size: 8,
             auto_import: true,
             transcription_enabled: false,
@@ -65,6 +71,7 @@ pub struct Recording {
     pub error: Option<String>,
     pub attempts: u32,
     pub duration: Option<f64>,
+    pub language: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

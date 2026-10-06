@@ -15,6 +15,7 @@ pub struct Job {
     pub id: String,
     pub recording_id: String,
     pub path: String,
+    pub language: String,
 }
 
 impl Database {
@@ -25,7 +26,7 @@ impl Database {
         };
         let c = db.connect()?;
         let version: u32 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 3 {
+        if version > 4 {
             bail!("Databasen tillhör en nyare version av DreamWhisper");
         }
         c.execute_batch("PRAGMA journal_mode=WAL;
@@ -65,7 +66,8 @@ impl Database {
         if version < 3 {
             db.migrate_legacy_workflow()?;
         }
-        c.execute_batch("PRAGMA user_version=3")?;
+        crate::journal::migrate(&c)?;
+        db.recover_drafting()?;
         Ok(db)
     }
     pub fn connect(&self) -> Result<Connection> {
@@ -179,7 +181,7 @@ impl Database {
     }
     pub fn recordings(&self) -> Result<Vec<Recording>> {
         let c = self.connect()?;
-        let mut q = c.prepare("SELECT r.id,r.name,r.archive_path,r.sha256,r.size,r.source_modified_at,r.imported_at,CASE WHEN r.available=0 THEN 'failed' ELSE j.status END,CASE WHEN r.available=0 THEN 'Arkivfilen saknas' ELSE j.error END,j.attempts,(SELECT json_extract(metadata,'$.duration') FROM transcription_runs WHERE recording_id=r.id ORDER BY rowid DESC LIMIT 1) FROM recordings r JOIN jobs j ON j.recording_id=r.id ORDER BY r.imported_at DESC,r.id")?;
+        let mut q = c.prepare("SELECT r.id,r.name,r.archive_path,r.sha256,r.size,r.source_modified_at,r.imported_at,CASE WHEN r.available=0 THEN 'failed' ELSE j.status END,CASE WHEN r.available=0 THEN 'Arkivfilen saknas' ELSE j.error END,j.attempts,(SELECT json_extract(metadata,'$.duration') FROM transcription_runs WHERE recording_id=r.id ORDER BY rowid DESC LIMIT 1),COALESCE((SELECT language FROM recording_languages WHERE recording_id=r.id),'sv') FROM recordings r JOIN jobs j ON j.recording_id=r.id ORDER BY r.imported_at DESC,r.id")?;
         let recordings = q
             .query_map([], |r| {
                 Ok(Recording {
@@ -194,6 +196,7 @@ impl Database {
                     error: r.get(8)?,
                     attempts: r.get(9)?,
                     duration: r.get(10)?,
+                    language: r.get(11)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -210,7 +213,7 @@ impl Database {
     pub fn claim(&self) -> Result<Option<Job>> {
         let mut c = self.connect()?;
         let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let job = tx.query_row("SELECT j.id,r.id,r.archive_path FROM jobs j JOIN recordings r ON r.id=j.recording_id WHERE j.status='queued' AND r.available=1 ORDER BY r.imported_at,j.rowid LIMIT 1", [], |r| Ok(Job { id:r.get(0)?,recording_id:r.get(1)?,path:r.get(2)? })).optional()?;
+        let job = tx.query_row("SELECT j.id,r.id,r.archive_path,j.language FROM jobs j JOIN recordings r ON r.id=j.recording_id WHERE j.status='queued' AND r.available=1 ORDER BY r.imported_at,j.rowid LIMIT 1", [], |r| Ok(Job { id:r.get(0)?,recording_id:r.get(1)?,path:r.get(2)?,language:r.get(3)? })).optional()?;
         if let Some(j) = &job {
             tx.execute("UPDATE jobs SET status='running',attempts=attempts+1,error=NULL,started_at=?1 WHERE id=?2", params![chrono::Utc::now().to_rfc3339(),j.id])?;
         }
@@ -225,7 +228,7 @@ impl Database {
         Ok(())
     }
     pub fn retry(&self, recording: &str) -> Result<()> {
-        let n = self.connect()?.execute("UPDATE jobs SET status='queued',error=NULL WHERE recording_id=?1 AND status<>'running' AND EXISTS(SELECT 1 FROM recordings WHERE id=?1 AND available=1)", [recording])?;
+        let n = self.connect()?.execute("UPDATE jobs SET status='queued',error=NULL,language=COALESCE((SELECT language FROM recording_languages WHERE recording_id=?1),'sv') WHERE recording_id=?1 AND status<>'running' AND EXISTS(SELECT 1 FROM recordings WHERE id=?1 AND available=1)", [recording])?;
         if n == 0 {
             bail!("Inspelningen saknas, körs redan eller saknar arkivfil");
         }

@@ -4,13 +4,19 @@ use dreamwhisper_lib::{archive, service::Service, worker::Worker};
 use std::{path::PathBuf, sync::atomic::AtomicBool};
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().collect();
-    if args.len() != 4 {
-        anyhow::bail!("Usage: transcribe PYTHON MODEL_DIRECTORY AUDIO_FILE");
+    if args.len() != 4 && args.len() != 5 {
+        anyhow::bail!("Usage: transcribe PYTHON MODEL_DIRECTORY AUDIO_FILE [sv|en]");
     }
     let temp = tempfile::tempdir()?;
     let service = Service::open(temp.path().join("data"))?;
     let input = PathBuf::from(&args[3]);
     archive::import_file(&service.db, &service.root, &input, None)?;
+    if let Some(language) = args.get(4) {
+        let recording = service.db.recordings()?.remove(0);
+        service
+            .db
+            .set_recording_language(&recording.id, &language.to_string_lossy())?;
+    }
     let job = service.db.claim()?.context("Inget jobb skapades")?;
     let mut settings = service.db.settings(&service.root)?;
     settings.python_path = args[1].to_string_lossy().into();

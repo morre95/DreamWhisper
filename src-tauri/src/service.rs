@@ -251,12 +251,35 @@ impl Service {
         std::thread::spawn(move || {
             let mut worker: Option<Worker> = None;
             let mut configuration = String::new();
+            let mut saved_configuration = String::new();
             let mut startup_failed = false;
             let mut revision = 0;
             while !service.stop.load(Ordering::Relaxed) {
                 let result = (|| -> Result<()> {
                     let image_guard = service.image_operations.lock().unwrap();
-                    if let Some(job) = service.db.next_image_job()? {
+                    let next_image = service.db.next_image_job()?;
+                    let active_image = next_image.as_ref().is_some_and(|j| j.status != "queued");
+                    let draft_job = if active_image {
+                        None
+                    } else {
+                        service.db.claim_drafting()?
+                    };
+                    if let Some(job) = draft_job {
+                        worker = None;
+                        configuration.clear();
+                        service.worker_state("drafting", None);
+                        service.activity("Skapar scenutkast med den lokala språkmodellen …");
+                        let result =
+                            crate::images::release_idle_comfy(&service.db).and_then(|()| {
+                                crate::drafting::run(&job, &service.root, &service.stop)
+                            });
+                        let error = result.as_ref().err().map(|e| format!("{e:#}"));
+                        service.db.finish_drafting(job, result)?;
+                        service.worker_state("ready", error);
+                        service.activity("Scenutkastet har behandlats. Granska det i Journal.");
+                        return Ok(());
+                    }
+                    if let Some(job) = next_image {
                         // This supervisor also owns Whisper: dropping it here is an
                         // acknowledged GPU handoff, never concurrent generation.
                         worker = None;
@@ -281,11 +304,12 @@ impl Service {
                     let settings = service.db.settings(&service.root)?;
                     let config = serde_json::to_string(&settings)?;
                     let next_revision = service.worker_revision.load(Ordering::Relaxed);
-                    if config != configuration || revision != next_revision {
+                    if config != saved_configuration || revision != next_revision {
                         revision = next_revision;
                         worker = None;
                         startup_failed = false;
-                        configuration = config;
+                        saved_configuration = config;
+                        configuration.clear();
                     }
                     if !settings.transcription_enabled {
                         service.worker_state("paused", None);
@@ -296,36 +320,62 @@ impl Service {
                         std::thread::sleep(Duration::from_millis(500));
                         return Ok(());
                     }
-                    if worker.is_none() {
-                        service.worker_state("loading", None);
-                        service.activity("Laddar KB-Whisper på GPU …");
-                        match Worker::spawn(&settings, &script, &service.root, &service.stop) {
-                            Ok(w) => {
-                                worker = Some(w);
-                                service.worker_state("ready", None);
-                                service.activity("Redo för transkribering");
-                            }
-                            Err(e) => {
-                                startup_failed = true;
-                                service.worker_state("error", Some(format!("{e:#}")));
-                                service.activity(format!("Worker: {e:#}. Åtgärda felet och välj Starta om motorn under Arbetskö."));
-                                return Ok(());
+                    let Some(job) = service.db.claim()? else {
+                        if worker.is_none()
+                            && Path::new(&settings.model_path).join("model.bin").is_file()
+                        {
+                            service.worker_state("loading", None);
+                            let loaded =
+                                crate::images::release_idle_comfy(&service.db).and_then(|()| {
+                                    Worker::spawn(&settings, &script, &service.root, &service.stop)
+                                });
+                            match loaded {
+                                Ok(w) => {
+                                    worker = Some(w);
+                                    configuration = serde_json::to_string(&settings)?;
+                                }
+                                Err(e) => {
+                                    startup_failed = true;
+                                    service.worker_state("error", Some(format!("{e:#}")));
+                                    return Ok(());
+                                }
                             }
                         }
-                    }
-                    // Pause may have been requested while the model was loading.
-                    if !service.db.settings(&service.root)?.transcription_enabled {
-                        service.worker_state("paused", None);
-                        return Ok(());
-                    }
-                    if service.db.next_image_job()?.is_some() {
-                        return Ok(());
-                    }
-                    let Some(job) = service.db.claim()? else {
                         service.worker_state("ready", None);
                         std::thread::sleep(Duration::from_millis(500));
                         return Ok(());
                     };
+                    let mut actual_settings = settings.clone();
+                    if job.language == "en" {
+                        actual_settings.model_path = settings.english_model_path.clone();
+                    }
+                    if !Path::new(&actual_settings.model_path)
+                        .join("model.bin")
+                        .is_file()
+                    {
+                        service.db.failed(&job.id, "Talmodellen för det valda språket saknas. Konfigurera modellmappen i Inställningar och försök igen.")?;
+                        return Ok(());
+                    }
+                    let model_config = serde_json::to_string(&actual_settings)?;
+                    if worker.is_none() || model_config != configuration {
+                        worker = None;
+                        service.worker_state("loading", None);
+                        service.activity("Laddar lokal talmodell på GPU …");
+                        match crate::images::release_idle_comfy(&service.db).and_then(|()| {
+                            Worker::spawn(&actual_settings, &script, &service.root, &service.stop)
+                        }) {
+                            Ok(w) => {
+                                worker = Some(w);
+                                configuration = model_config;
+                            }
+                            Err(e) => {
+                                service.db.failed(&job.id, "Talmodellen kunde inte startas. Se Arbetskö och starta om motorn.")?;
+                                startup_failed = true;
+                                service.worker_state("error", Some(format!("{e:#}")));
+                                return Ok(());
+                            }
+                        }
+                    }
                     service.worker_state("running", None);
                     let result = worker
                         .as_mut()

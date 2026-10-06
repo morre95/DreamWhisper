@@ -1,4 +1,5 @@
 import { invoke, convertFileSrc, isTauri } from '@tauri-apps/api/core';
+import { JournalView } from './journal';
 import { ArchiveAudio } from './audio';
 import { ImagesView, selectedText } from './images';
 import type { Device, ImportReport, Recording, Run, Settings, Snapshot, Transcript } from './types';
@@ -18,7 +19,7 @@ let activeRun: string | null = null;
 let loaded: Transcript | null = null;
 let audioSource: ArchiveAudio | null = null;
 let selectionEvents: AbortController | null = null;
-let page: 'library' | 'queue' | 'images' | 'gallery' | 'devices' | 'settings' = 'library';
+let page: 'journal' | 'library' | 'queue' | 'images' | 'gallery' | 'devices' | 'settings' = 'journal';
 let filter = '';
 let loadSequence = 0;
 let dirty = false;
@@ -36,21 +37,22 @@ app.innerHTML = `
     <div class="brand"><span class="brand-icon">${icons.wave}</span><div>DreamWhisper<small>DINA ORD, BEVARADE.</small></div></div>
     <div class="nav-label">DITT ARKIV</div>
     <nav aria-label="Huvudmeny">
-      <button data-page="library" class="nav active">${icons.library}Inspelningar<span id="count">0</span></button>
+      <button data-page="journal" class="nav active">${icons.library}Journal</button>
+      <button data-page="library" class="nav">${icons.library}Inspelningar<span id="count">0</span></button>
       <button data-page="queue" class="nav">${icons.wave}Arbetskö<span id="queue-count">0</span></button>
       <button data-page="images" class="nav">${icons.plus}Bilder</button>
       <button data-page="gallery" class="nav">${icons.library}Galleri</button>
       <button data-page="devices" class="nav">${icons.device}Diktafon</button>
       <button data-page="settings" class="nav">${icons.settings}Inställningar</button>
     </nav>
-    <div class="sidebar-bottom"><span class="privacy-dot"></span> Allt stannar på din dator<small>Svenskt tal. Lokal transkribering.</small></div>
+    <div class="sidebar-bottom"><span class="privacy-dot"></span> Allt stannar på din dator<small>Drömmar och meditationer. Svenska och engelska.</small></div>
   </aside>
   <main>
-    <header><div class="breadcrumb">PERSONLIGT LJUDARKIV <span>/</span> <b id="page-label">Inspelningar</b></div><span class="local-badge">● Lokalt</span></header>
+    <header><div class="breadcrumb">PERSONLIGT LJUDARKIV <span>/</span> <b id="page-label">Journal</b></div><span class="local-badge">● Lokalt</span></header>
     <div id="notice" class="notice hidden" role="status"></div>
-    <section id="library-page">
+    <section id="journal-page"></section><section id="library-page" class="hidden">
       <div class="page-heading"><div><div class="eyebrow">FRÅN RÖST TILL TEXT</div><h1>Dina inspelningar</h1><p>Fånga tanken. Hitta orden igen.</p></div><button id="import-open" class="primary">${icons.plus}Importera ljud</button></div>
-      <div class="overview"><div><span>ARKIVERADE</span><strong id="stat-all">0</strong><small>inspelningar</small></div><div><span>TRANSKRIBERADE</span><strong id="stat-done">0</strong><small>redo att läsa</small></div><div><span>I ARBETSKÖN</span><strong id="stat-queue">0</strong><small>väntar på transkribering</small></div><div class="engine"><span class="engine-dot"></span><div><b>KB-Whisper large</b><small>SVENSKA · FP16 · CUDA</small><p id="engine-status">Transkribering pausad</p></div></div></div>
+      <div class="overview"><div><span>ARKIVERADE</span><strong id="stat-all">0</strong><small>inspelningar</small></div><div><span>TRANSKRIBERADE</span><strong id="stat-done">0</strong><small>redo att läsa</small></div><div><span>I ARBETSKÖN</span><strong id="stat-queue">0</strong><small>väntar på transkribering</small></div><div class="engine"><span class="engine-dot"></span><div><b>KB-Whisper large</b><small>SVENSKA / ENGLISH · FP16 · CUDA</small><p id="engine-status">Transkribering pausad</p></div></div></div>
       <div class="workspace"><section class="recording-panel"><div class="list-head"><h2>Bibliotek</h2><span id="list-count">0 filer</span></div><label class="search-label"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="Sök namn eller transkript…" aria-label="Sök inspelningar" /></label><div id="recording-list"></div></section>
       <section class="detail-panel" id="detail"><div class="detail-empty"><span class="empty-icon">${icons.wave}</span><h2>En tanke börjar med din röst</h2><p>Anslut din Sony-diktafon eller importera en mapp med inspelningar. Välj sedan en fil för att lyssna och läsa.</p><span class="format-note">MP3 & WAV · SVENSK TRANSKRIBERING</span></div></section></div>
     </section>
@@ -59,6 +61,8 @@ app.innerHTML = `
   </main>
   <dialog id="import-dialog"><form id="import-form"><div class="eyebrow">LOKAL IMPORT</div><h2>Importera inspelningar</h2><p>Ange mappen med ljudfiler. Undermappar tas med och originalen bevaras.</p><label>Mappens fullständiga sökväg<input id="import-path" required placeholder="/run/media/ditt-namn/IC RECORDER/PRIVATE/SONY/REC_FILE" /></label><div class="dialog-actions"><button type="button" id="import-cancel" class="secondary">Avbryt</button><button type="submit" class="primary">Importera mapp</button></div></form></dialog>
   <div id="toast" role="status" class="toast hidden"></div>`;
+
+const journalView = new JournalView($('#journal-page'), toast, (id, runId) => { void action(async () => { selected = id; await navigate('library'); await loadDetail(id, runId ?? undefined); }); });
 
 const imagesView = new ImagesView($('#images-page'), () => document.querySelector('#comfy-settings'), toast, (id, runId) => {
   if (dirty && !window.confirm('Du har osparade rättningar. Lämna dem?')) return;
@@ -83,7 +87,7 @@ async function refresh() {
   refreshing = true;
   try {
     const previous = state;
-    const [snapshot] = await Promise.all([invoke<Snapshot>('snapshot'), imagesView.refresh()]);
+    const [snapshot] = await Promise.all([invoke<Snapshot>('snapshot'), imagesView.refresh(), journalView.refresh()]);
     state = snapshot;
     $('#count').textContent = String(state.recordings.length);
     $('#stat-all').textContent = String(state.recordings.length);
@@ -142,9 +146,9 @@ function renderDetail(recording: Recording, transcript: Transcript, runs: Run[])
     <div class="detail-head"><div class="eyebrow">INSPELNING</div><h2>${esc(recording.name)}</h2><div class="detail-meta">${esc(date(recording.source_modified_at))}<span>·</span>${(recording.size / 1024 / 1024).toFixed(1)} MB<span>·</span><span class="status ${esc(recording.status)}">${esc(labels[recording.status])}</span></div></div>
     <div class="player"><span class="player-label">ORIGINALLJUD</span><audio id="audio" controls preload="metadata"></audio><div id="audio-error" class="hidden inline-error"></div></div>
     ${recording.error ? `<p class="inline-error">${esc(recording.error)}</p>` : ''}
-    <div class="transcript-tools"><h3>Transkript <span>SV</span></h3><div class="tool-actions"><button id="retry" class="text-button" ${['running', 'queued'].includes(recording.status) ? 'disabled' : ''}>${recording.status === 'queued' ? 'Redan i kön' : recording.status === 'running' ? 'Transkriberar' : transcript.run_id ? 'Ny transkribering' : 'Försök igen'}</button>${transcript.run_id ? '<select id="export-format" aria-label="Exportformat"><option value="txt">TXT</option><option value="md">Markdown</option><option value="srt">SRT</option></select><button id="export" class="secondary small">Exportera ↗</button>' : ''}</div></div>
+    <div class="transcript-tools"><h3>Transkript <span>${esc(String(transcript.metadata?.language ?? recording.language).toUpperCase())}</span></h3><label>Talets språk<select id="recording-language" ${recording.status === 'running' ? 'disabled' : ''}><option value="sv" ${recording.language === 'sv' ? 'selected' : ''}>Svenska</option><option value="en" ${recording.language === 'en' ? 'selected' : ''}>English</option></select></label><div class="tool-actions"><button id="retry" class="text-button" ${['running', 'queued'].includes(recording.status) ? 'disabled' : ''}>${recording.status === 'queued' ? 'Redan i kön' : recording.status === 'running' ? 'Transkriberar' : transcript.run_id ? 'Ny transkribering' : 'Försök igen'}</button>${transcript.run_id ? '<select id="export-format" aria-label="Exportformat"><option value="txt">TXT</option><option value="md">Markdown</option><option value="srt">SRT</option></select><button id="export" class="secondary small">Exportera ↗</button>' : ''}</div></div>
     ${runs.length > 1 ? `<label class="version-label">Version<select id="version">${runs.map((run, i) => `<option value="${esc(run.id)}" ${run.id === transcript.run_id ? 'selected' : ''}>${esc(date(run.created_at))}${i === 0 ? ' · senaste' : ''}</option>`).join('')}</select></label>` : ''}
-    ${transcript.segments.length ? '<details class="image-selection"><summary>Markera text för en bild</summary><p class="muted">Markera valfri text, även över flera stycken. Bildprompten kan ändras innan du skapar bilden.</p><div id="image-transcript-text" class="selectable-transcript" tabindex="0"></div><button id="image-from-selection" class="secondary" disabled>Skapa bild av markering</button></details>' : ''}
+    ${transcript.segments.length ? '<details class="image-selection"><summary>Markera text för en bild</summary><p class="muted">Markera valfri text, även över flera stycken. Bildprompten kan ändras innan du skapar bilden.</p><div id="image-transcript-text" class="selectable-transcript" tabindex="0"></div><button id="image-from-selection" class="secondary" disabled>Skapa bild av markering</button><button id="journal-from-selection" class="secondary" disabled>Journalpost av markering</button><button id="journal-from-transcript" class="secondary">Journalpost av hela transkriptet</button></details>' : ''}
     <div class="transcript-content">${transcript.run_id ? (transcript.segments.length ? transcript.segments.map(s => `<article class="segment" data-start="${s.start}" data-end="${s.end}"><button class="timestamp" data-seek="${s.start}" title="Spela från denna tid">${clock(s.start)}</button><textarea data-segment="${s.id}" aria-label="Text vid ${clock(s.start)}" rows="2">${esc(s.edited_text ?? s.text)}</textarea></article>`).join('') : '<p class="transcript-empty">Inget tal hittades i inspelningen.</p>') : `<div class="transcript-empty"><p>${recording.status === 'running' ? 'Din inspelning transkriberas …' : recording.status === 'failed' ? 'Transkriberingen misslyckades. Åtgärda felet och försök igen.' : 'Inspelningen ligger i arbetskön.'}</p><small>${state?.settings.transcription_enabled ? 'Texten visas när transkriberingen är klar.' : 'Kön är pausad. Öppna Arbetskö och välj Starta kön.'}</small></div>`}</div>
     ${transcript.run_id ? '<div class="save-bar"><span id="edit-status">Tidsstämplarna följer originalljudet.</span><button id="save-edits" class="primary small" disabled>Spara rättningar</button></div>' : ''}`;
   const audio = $<HTMLAudioElement>('#audio');
@@ -182,6 +186,7 @@ function renderDetail(recording: Recording, transcript: Transcript, runs: Run[])
     const updateSelectionText = () => {
       selectionText.textContent = Array.from(document.querySelectorAll<HTMLTextAreaElement>('[data-segment]')).map(input => input.value).join('\n\n');
       selectionButton.disabled = true;
+      $<HTMLButtonElement>('#journal-from-selection').disabled = true;
     };
     updateSelectionText();
     let captured = '';
@@ -189,8 +194,18 @@ function renderDetail(recording: Recording, transcript: Transcript, runs: Run[])
     document.addEventListener('selectionchange', () => {
       captured = selectedText(selectionText, window.getSelection());
       selectionButton.disabled = !captured;
+      $<HTMLButtonElement>('#journal-from-selection').disabled = !captured;
     }, { signal: selectionEvents.signal });
     document.querySelectorAll<HTMLTextAreaElement>('[data-segment]').forEach(input => input.addEventListener('input', updateSelectionText));
+    const toJournal = async (text: string) => {
+      if (!text.trim()) return;
+      if (dirty) await saveEdits();
+      await journalView.create(text, recording.id, transcript.run_id, transcript.metadata?.language === 'en' ? 'en' : 'sv');
+      await navigate('journal');
+    };
+    $<HTMLButtonElement>('#journal-from-selection').onmousedown = event => event.preventDefault();
+    $<HTMLButtonElement>('#journal-from-selection').onclick = () => void action(() => toJournal(captured));
+    $<HTMLButtonElement>('#journal-from-transcript').onclick = () => void action(() => toJournal(selectionText.textContent ?? ''));
     selectionButton.onmousedown = event => event.preventDefault();
     selectionButton.onclick = () => void action(async () => {
       const text = captured;
@@ -199,6 +214,7 @@ function renderDetail(recording: Recording, transcript: Transcript, runs: Run[])
       if (await imagesView.fromSelection(text, recording.id, transcript.run_id)) { dirty = false; navigate('images'); }
     });
   }
+  $<HTMLSelectElement>('#recording-language').onchange = event => void action(async () => { await invoke('set_recording_language', { id: recording.id, language: (event.target as HTMLSelectElement).value }); toast('Språket sparat. Välj Ny transkribering för att köra om ett tidigare transkript.'); await refresh(); });
   $('#retry').onclick = () => void action(async () => { await invoke('retry_recording', { id: recording.id }); toast(`Inspelningen har lagts i kön.${transcript.run_id ? ' Tidigare transkript finns kvar.' : ''}${state?.settings.transcription_enabled ? '' : ' Kön är pausad – välj Starta kön.'}`); await refresh(); navigate('queue'); });
   document.querySelector<HTMLSelectElement>('#version')?.addEventListener('change', event => {
     if (dirty && !window.confirm('Du har osparade rättningar. Byta version?')) { (event.target as HTMLSelectElement).value = activeRun!; return; }
@@ -227,8 +243,10 @@ async function saveEdits() {
 }
 function queueStatus() {
   if (!state) return 'Hämtar köstatus …';
+  if (state.worker_status === 'drafting') return 'Skapar scenutkast';
+  if (state.worker_status === 'awaiting_images') return 'Väntar på bildskapande';
   if (!state.settings.transcription_enabled) return state.worker_status === 'running' ? 'Pausar efter pågående inspelning' : 'Transkribering pausad';
-  return ({ loading: 'Laddar modellen …', running: 'Transkriberar', error: 'Transkriberingsmotorn behöver åtgärdas', ready: 'Redo för transkribering', awaiting_images: 'Väntar på bildskapande' } as Record<string, string>)[state.worker_status] ?? 'Startar transkribering …';
+  return ({ loading: 'Laddar modellen …', running: 'Transkriberar', error: 'Transkriberingsmotorn behöver åtgärdas', ready: 'Redo för transkribering', awaiting_images: 'Väntar på bildskapande', drafting: 'Skapar scenutkast' } as Record<string, string>)[state.worker_status] ?? 'Startar transkribering …';
 }
 function renderQueue() {
   if (!state) return;
@@ -275,24 +293,28 @@ function deviceCard(d: Device) {
 function renderSettings() {
   if (!state) return;
   const s = state.settings;
-  $('#settings-page').innerHTML = `<div class="page-heading"><div><div class="eyebrow">DIN DATOR, DINA ORD</div><h1>Inställningar</h1><p>Välj din lokala Pythonmiljö och KB-Whisper-modell.</p></div></div><form id="settings-form" class="settings-card settings-form"><h2>Transkribering</h2><p>Installera Pythonmiljön och hämta modellen enligt README innan du aktiverar transkribering.</p><label>Pythonprogrammets sökväg<input name="python_path" value="${esc(s.python_path)}" required spellcheck="false" /></label><label>Modellmapp<input name="model_path" value="${esc(s.model_path)}" required spellcheck="false" /><small>Mappen ska innehålla model.bin och modellens konfigurationsfiler.</small></label><label>Batchstorlek<select name="batch_size">${[1, 2, 4, 8, 16].map(n => `<option ${n === s.batch_size ? 'selected' : ''}>${n}</option>`).join('')}</select><small>Starta med 8. Vid minnesbrist försöker workern med mindre batcher i FP16.</small></label><label class="checkbox-label"><input type="checkbox" name="transcription_enabled" ${s.transcription_enabled ? 'checked' : ''} />Aktivera transkribering</label><label class="checkbox-label"><input type="checkbox" name="auto_import" ${s.auto_import ? 'checked' : ''} />Importera automatiskt från registrerad diktafon</label><label class="checkbox-label"><input type="checkbox" name="start_at_login" ${s.start_at_login ? 'checked' : ''} />Starta i systemfältet vid inloggning (byggd app)</label><div class="settings-info">Svenska · KB-Whisper large · CUDA · FP16<br>Arkiv och databas: <code>${esc(state.data_dir)}</code><br>Worker-logg: <code>${esc(state.data_dir)}/logs/worker.log</code></div><button type="submit" class="primary">Spara inställningar</button></form><section id="comfy-settings" class="settings-card settings-form"></section>`;
+  $('#settings-page').innerHTML = `<div class="page-heading"><div><div class="eyebrow">DIN DATOR, DINA ORD</div><h1>Inställningar</h1><p>Välj din lokala Pythonmiljö och KB-Whisper-modell.</p></div></div><form id="settings-form" class="settings-card settings-form"><h2>Transkribering</h2><p>Installera Pythonmiljön och hämta modellen enligt README innan du aktiverar transkribering.</p><label>Pythonprogrammets sökväg<input name="python_path" value="${esc(s.python_path)}" required spellcheck="false" /></label><label>Modellmapp<input name="model_path" value="${esc(s.model_path)}" required spellcheck="false" /><small>Mappen ska innehålla model.bin och modellens konfigurationsfiler.</small></label><label>Engelsk modellmapp<input name="english_model_path" value="${esc(s.english_model_path)}" spellcheck="false" /><small>Systran/faster-whisper-large-v3, hämtad lokalt enligt README.</small></label><label>Batchstorlek<select name="batch_size">${[1, 2, 4, 8, 16].map(n => `<option ${n === s.batch_size ? 'selected' : ''}>${n}</option>`).join('')}</select><small>Starta med 8. Vid minnesbrist försöker workern med mindre batcher i FP16.</small></label><label class="checkbox-label"><input type="checkbox" name="transcription_enabled" ${s.transcription_enabled ? 'checked' : ''} />Aktivera transkribering</label><label class="checkbox-label"><input type="checkbox" name="auto_import" ${s.auto_import ? 'checked' : ''} />Importera automatiskt från registrerad diktafon</label><label class="checkbox-label"><input type="checkbox" name="start_at_login" ${s.start_at_login ? 'checked' : ''} />Starta i systemfältet vid inloggning (byggd app)</label><div class="settings-info">Svenska · KB-Whisper large · CUDA · FP16<br>Arkiv och databas: <code>${esc(state.data_dir)}</code><br>Worker-logg: <code>${esc(state.data_dir)}/logs/worker.log</code></div><button type="submit" class="primary">Spara inställningar</button></form><section id="comfy-settings" class="settings-card settings-form"></section><section id="drafting-settings" class="settings-card settings-form"></section>`;
   imagesView.showSettings();
+  journalView.renderSettings($('#drafting-settings'));
   $('#settings-form').onsubmit = event => { event.preventDefault(); void action(async () => {
     const data = new FormData(event.target as HTMLFormElement);
-    const settings: Settings = { python_path: String(data.get('python_path')).trim(), model_path: String(data.get('model_path')).trim(), batch_size: Number(data.get('batch_size')), transcription_enabled: data.has('transcription_enabled'), auto_import: data.has('auto_import'), start_at_login: data.has('start_at_login') };
+    const settings: Settings = { python_path: String(data.get('python_path')).trim(), model_path: String(data.get('model_path')).trim(), english_model_path: String(data.get('english_model_path')).trim(), batch_size: Number(data.get('batch_size')), transcription_enabled: data.has('transcription_enabled'), auto_import: data.has('auto_import'), start_at_login: data.has('start_at_login') };
     await invoke('save_settings', { settings }); toast('Inställningar sparade'); await refresh();
   }); };
 }
-function navigate(next: typeof page) {
+async function navigate(next: typeof page) {
+  if (page === 'journal') await journalView.flush();
+  if (page === 'journal' && next !== page) journalView.hide();
   if (dirty && !window.confirm('Du har osparade rättningar. Lämna dem?')) return;
   if (page === 'library' && next !== page) { audioSource?.dispose(); audioSource = null; dirty = false; }
   if (page === 'images' && next !== page) imagesView.hide();
   if (page === 'library' && next !== page) selectionEvents?.abort();
   imagesView.hideGallery();
   page = next;
-  for (const name of ['library', 'queue', 'images', 'gallery', 'devices', 'settings']) $(`#${name}-page`).classList.toggle('hidden', name !== page);
+  for (const name of ['journal', 'library', 'queue', 'images', 'gallery', 'devices', 'settings']) $(`#${name}-page`).classList.toggle('hidden', name !== page);
   document.querySelectorAll<HTMLElement>('[data-page]').forEach(b => b.classList.toggle('active', b.dataset.page === page));
-  $('#page-label').textContent = { library: 'Inspelningar', queue: 'Arbetskö', images: 'Bilder', gallery: 'Galleri', devices: 'Diktafon', settings: 'Inställningar' }[page];
+  $('#page-label').textContent = { journal: 'Journal', library: 'Inspelningar', queue: 'Arbetskö', images: 'Bilder', gallery: 'Galleri', devices: 'Diktafon', settings: 'Inställningar' }[page];
+  if (page === 'journal') await journalView.show();
   if (page === 'devices') renderDevices();
   if (page === 'queue') renderQueue();
   if (page === 'images') imagesView.show();
@@ -300,7 +322,7 @@ function navigate(next: typeof page) {
   if (page === 'settings') renderSettings();
   if (page === 'library' && selected) void action(() => loadDetail(selected!));
 }
-document.querySelectorAll<HTMLButtonElement>('[data-page]').forEach(b => b.onclick = () => navigate(b.dataset.page as typeof page));
+document.querySelectorAll<HTMLButtonElement>('[data-page]').forEach(b => b.onclick = () => void action(() => navigate(b.dataset.page as typeof page)));
 $('#import-open').onclick = () => $<HTMLDialogElement>('#import-dialog').showModal();
 $('#import-cancel').onclick = () => $<HTMLDialogElement>('#import-dialog').close();
 $('#import-form').onsubmit = event => { event.preventDefault(); if (busy) return; void action(async () => {
@@ -319,9 +341,11 @@ $('#search').oninput = () => {
     if (sequence === searchSequence) { searchResults = new Set(ids); renderList(); }
   });
 };
-window.addEventListener('beforeunload', event => { if (dirty) { event.preventDefault(); } });
+window.addEventListener('beforeunload', event => { if (dirty || journalView.dirty) { event.preventDefault(); } });
 window.addEventListener('pagehide', () => audioSource?.dispose());
 if (isTauri()) { void refresh(); setInterval(() => void refresh(), 2000); }
 else {
   const notice = $('#notice'); notice.classList.remove('hidden'); notice.textContent = 'Webbförhandsvisning. Starta desktopappen med npm run desktop för enhetsupptäckt, import och transkribering.';
 }
+
+void action(() => journalView.show());

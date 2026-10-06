@@ -36,7 +36,7 @@ def cuda_libraries() -> None:
                 ctypes.CDLL(str(lib), mode=ctypes.RTLD_GLOBAL)
 
 
-def validated_request(value: dict) -> tuple[str, str]:
+def validated_request(value: dict) -> tuple[str, str, str]:
     if not isinstance(value, dict) or value.get("type") != "transcribe":
         raise ValueError("Expected a transcribe request")
     job_id, path = value.get("job_id"), value.get("path")
@@ -44,12 +44,15 @@ def validated_request(value: dict) -> tuple[str, str]:
         raise ValueError("Missing job_id")
     if not isinstance(path, str) or not Path(path).is_file():
         raise ValueError("Audio file does not exist")
-    return job_id, path
+    language = value.get("language", "sv")
+    if language not in ("sv", "en"):
+        raise ValueError("Expected language sv or en")
+    return job_id, path, language
 
 
-def transcribe(pipeline, path: str, batch_size: int, job_id: str) -> tuple[list, float]:
+def transcribe(pipeline, path: str, batch_size: int, job_id: str, language: str = "sv") -> tuple[list, float]:
     segments, info = pipeline.transcribe(
-        path, language="sv", task="transcribe", batch_size=batch_size,
+        path, language=language, task="transcribe", batch_size=batch_size,
         word_timestamps=True, vad_filter=True, condition_on_previous_text=False,
     )
     result = []
@@ -96,13 +99,13 @@ def main() -> int:
             request = json.loads(line)
             if request.get("type") == "shutdown":
                 return 0
-            job_id, path = validated_request(request)
+            job_id, path, language = validated_request(request)
             started = time.monotonic()
             batch_size = args.batch_size
             while True:
                 try:
                     # Fresh pipeline for each attempt resets VAD/timestamp state.
-                    result, duration = transcribe(BatchedInferencePipeline(model), path, batch_size, job_id)
+                    result, duration = transcribe(BatchedInferencePipeline(model), path, batch_size, job_id, language)
                     break
                 except RuntimeError as exc:
                     if not is_oom(exc) or batch_size == 1:
@@ -110,7 +113,7 @@ def main() -> int:
                     batch_size //= 2
                     emit("progress", job_id=job_id, seconds=0, duration=0, message=f"GPU-minnet tog slut; försöker med batch {batch_size}")
             emit("completed", job_id=job_id, segments=result, metadata={
-                "model": provenance, "compute_type": "float16", "device": "cuda", "language": "sv",
+                "model": provenance, "compute_type": "float16", "device": "cuda", "language": language,
                 "batch_size": batch_size, "duration": duration, "elapsed_seconds": time.monotonic() - started,
                 "faster_whisper_version": importlib.metadata.version("faster-whisper"),
                 "ctranslate2_version": importlib.metadata.version("ctranslate2"),
