@@ -205,7 +205,6 @@ impl Database {
             bail!("Flödet finns inte längre.");
         }
         tx.execute("INSERT INTO image_workflows VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET json=excluded.json", rusqlite::params![workflow.id,serde_json::to_string(&workflow)?])?;
-        select_workflow_in(&tx, &workflow.id)?;
         tx.commit()?;
         Ok(workflow.id)
     }
@@ -1217,6 +1216,7 @@ for line in sys.stdin:
                 input_name: "text".into(),
             }),
         })?;
+        db.select_workflow(&id)?;
         let draft = ImageDraft {
             prompt: "en skog".into(),
             negative_prompt: Some("suddigt, vattenstämpel".into()),
@@ -1300,6 +1300,9 @@ for line in sys.stdin:
             save("Fjärde")?,
         ];
         let selected = |db: &Database| db.comfy_settings().map(|c| c.selected_workflow_id);
+        // Saving never changes which flow Images uses for its next image.
+        assert_eq!(selected(&db)?, None);
+        db.select_workflow(&fourth)?;
         db.enqueue_image_with_workflow(
             ImageDraft {
                 prompt: "sparat bildjobb".into(),

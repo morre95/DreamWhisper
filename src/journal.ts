@@ -192,12 +192,10 @@ export class JournalView {
     // Polling never replaces a prompt while it is being edited.
     if (!force && (this.edits.size || target.querySelector<HTMLTextAreaElement>('#manual-prompt')?.value || signature === this.signature)) return;
     this.signature = signature;
-    const workflows = this.images?.workflows ?? [];
-    const selectedWorkflow = this.workflowId ?? this.images?.settings.selected_workflow_id;
     const revisions = this.snapshot.descriptions.filter(r => r.entry_id === e.id);
     target.innerHTML = `<div class="journal-review"><h2>Scener och bildpromptar</h2><p class="muted">Granska detaljer och kreativa tillägg. Bildprompten är på engelska och kan ändras. Ett citat hjälper dig att kontrollera källan; granska även modellens tolkning.</p>
       ${!this.snapshot.setup_ready ? '<p class="notice">Språkmodellen behöver installeras. Se README och Inställningar. Du kan alltid skriva en egen prompt.</p>' : ''}
-      <label>Bildflöde<select id="journal-workflow"><option value="">Välj sparat ComfyUI-flöde…</option>${workflows.map(w => `<option value="${esc(w.id)}" ${w.id === selectedWorkflow ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select></label>
+      <label>Bildflöde<select id="journal-workflow"></select></label>
       <div class="device-actions"><button id="journal-add-workflow" class="secondary">Lägg till flöde</button></div>
       <p id="journal-workflow-hint" class="muted"></p>
       <div class="device-actions"><button id="combine-scenes" class="secondary">Kombinera valda scener</button><button id="generate-all-scenes" class="primary">Generera alla scener separat</button></div>
@@ -246,7 +244,8 @@ export class JournalView {
     const select = this.container.querySelector<HTMLSelectElement>('#journal-workflow');
     if (!select) return;
     const workflows = this.images?.workflows ?? [];
-    const selected = this.workflowId ?? this.images?.settings.selected_workflow_id;
+    // A Journal choice that was deleted falls back to the flow Images uses.
+    const selected = workflows.some(w => w.id === this.workflowId) ? this.workflowId : this.images?.settings.selected_workflow_id;
     const signature = JSON.stringify([workflows.map(w => [w.id, w.name]), selected]);
     if (select.dataset.rendered !== signature) {
       select.dataset.rendered = signature;

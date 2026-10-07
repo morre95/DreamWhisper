@@ -240,7 +240,7 @@ export class ImagesView {
     })();
   }
   private editWorkflow(existing?: SavedWorkflow) {
-    showWorkflowEditor(this.notify, async () => { await this.refresh(); }, existing);
+    showWorkflowEditor(this.notify, async id => { await invoke('select_workflow', { id }); await this.refresh(); }, existing);
   }
   showSettings() {
     const container = this.configContainer(); if (!container) return;

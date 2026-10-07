@@ -107,10 +107,11 @@ test('imported workflows become selectable while an unsaved scene prompt stays i
   view.renderList = () => {};
   view.updateButtons = () => {};
   view.workflowId = 'imported';
+  let workflows = [{ id: 'old', name: 'Existing' }, { id: 'imported', name: 'New workflow' }];
   handle = async command => {
     if (command === 'journal_snapshot') return { entries: [entry()], drafts: [], jobs: [], descriptions: [] };
     assert.equal(command, 'image_snapshot');
-    return { jobs: [], workflows: [{ id: 'old', name: 'Existing' }, { id: 'imported', name: 'New workflow' }], settings: { selected_workflow_id: 'imported' } };
+    return { jobs: [], workflows, settings: { selected_workflow_id: 'imported' } };
   };
   await view.refresh();
   assert.match(select.innerHTML, /value="imported" selected>New workflow/);
@@ -120,4 +121,8 @@ test('imported workflows become selectable while an unsaved scene prompt stays i
   view.workflowId = 'old';
   await view.refresh();
   assert.match(select.innerHTML, /value="old" selected>Existing/);
+  // Deleting the Journal choice falls back to the flow selected for Images.
+  workflows = [{ id: 'imported', name: 'New workflow' }];
+  await view.refresh();
+  assert.match(select.innerHTML, /value="imported" selected>New workflow/);
 });
