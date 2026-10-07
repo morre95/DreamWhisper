@@ -120,6 +120,15 @@ pub struct ImageJob {
     pub images: Vec<GeneratedImage>,
     pub release_pending: bool,
 }
+impl ImageJob {
+    /// A settled job whose every image is deleted has nothing left to show or follow up.
+    pub(crate) fn is_emptied(&self) -> bool {
+        terminal(&self.status)
+            && !self.release_pending
+            && !self.images.is_empty()
+            && self.images.iter().all(|i| i.deleted)
+    }
+}
 #[derive(Serialize)]
 pub struct ImageSnapshot {
     pub workflows: Vec<SavedWorkflow>,
@@ -157,10 +166,18 @@ impl Database {
         image.deleted = true;
         self.save_deleted_image(&job, path)?;
         match std::fs::remove_file(&file) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.into()),
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
         }
+        if job.is_emptied() {
+            match std::fs::remove_dir(&directory) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(())
     }
     pub fn comfy_settings(&self) -> Result<ComfySettings> {
         read_config(&self.connect()?)
@@ -973,6 +990,25 @@ mod tests {
         assert_eq!(error.to_string(), "Bilden ligger utanför bildarkivet");
         assert!(outside.exists() && link.exists());
         assert!(db.image_jobs()?[0].images.iter().all(|i| !i.deleted));
+        Ok(())
+    }
+    #[test]
+    fn deleting_the_last_image_removes_the_settled_job() -> Result<()> {
+        let (temp, db, mut job) = fixture()?;
+        let directory = temp.path().join("images").join(&job.id);
+        std::fs::create_dir_all(&directory)?;
+        for name in ["first.png", "second.png"] {
+            let path = directory.join(name);
+            std::fs::write(&path, b"image")?;
+            job.images.push(generated(&path));
+        }
+        job.status = "completed".into();
+        db.save_image_job(&job)?;
+        db.delete_generated_image(temp.path(), &job.id, &job.images[0].path)?;
+        assert_eq!(db.image_jobs()?.len(), 1);
+        db.delete_generated_image(temp.path(), &job.id, &job.images[1].path)?;
+        assert!(db.image_jobs()?.is_empty());
+        assert!(!directory.exists());
         Ok(())
     }
     #[test]

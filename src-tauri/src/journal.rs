@@ -760,10 +760,14 @@ impl Database {
     ) -> Result<()> {
         let mut c = self.connect()?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute(
-            "UPDATE image_jobs SET json=?1 WHERE id=?2",
-            params![serde_json::to_string(job)?, job.id],
-        )?;
+        if job.is_emptied() {
+            tx.execute("DELETE FROM image_jobs WHERE id=?1", [&job.id])?;
+        } else {
+            tx.execute(
+                "UPDATE image_jobs SET json=?1 WHERE id=?2",
+                params![serde_json::to_string(job)?, job.id],
+            )?;
+        }
         for mut entry in all::<JournalEntry>(&tx, "journal_entries")? {
             if entry.favourite_image.as_deref() == Some(path) {
                 entry.favourite_image = None;
