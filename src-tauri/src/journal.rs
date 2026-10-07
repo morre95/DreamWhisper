@@ -1,5 +1,8 @@
 //! Local journal revisions and approval-bound generation. All writes are transactional.
-use crate::{db::Database, images::ImageDraft};
+use crate::{
+    db::Database,
+    images::{ImageDraft, ImageJob},
+};
 use anyhow::{ensure, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -740,7 +743,7 @@ impl Database {
         let mut entry: JournalEntry = read(&tx, "journal_entries", entry_id)?;
         if let Some(path) = &path {
             ensure!(
-                all::<crate::images::ImageJob>(&tx, "image_jobs")?
+                all::<ImageJob>(&tx, "image_jobs")?
                     .iter()
                     .any(|j| j.entry_id.as_deref() == Some(entry_id)
                         && j.images.iter().any(|i| !i.deleted && &i.path == path)),
@@ -753,11 +756,72 @@ impl Database {
         tx.commit()?;
         Ok(entry)
     }
-    pub(crate) fn save_deleted_image(
+    /// Deletes an entry with its descriptions, drafts and generation records. Its images
+    /// are either deleted too or kept in the image archive without the entry link.
+    pub fn delete_journal_entry(
         &self,
-        job: &crate::images::ImageJob,
-        path: &str,
+        root: &std::path::Path,
+        entry_id: &str,
+        delete_images: bool,
     ) -> Result<()> {
+        let mut c = self.connect()?;
+        let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        read::<JournalEntry>(&tx, "journal_entries", entry_id)?;
+        let drafting: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM drafting_jobs WHERE entry_id=?1 AND status='running')",
+            [entry_id],
+            |r| r.get(0),
+        )?;
+        ensure!(
+            !drafting,
+            "Vänta tills scenutkastet är klart innan du tar bort upplevelsen."
+        );
+        let jobs: Vec<ImageJob> = all::<ImageJob>(&tx, "image_jobs")?
+            .into_iter()
+            .filter(|j| j.entry_id.as_deref() == Some(entry_id))
+            .collect();
+        // Only settled jobs are safe to change: the supervisor rewrites active ones.
+        ensure!(
+            jobs.iter().all(ImageJob::is_settled),
+            "Vänta tills upplevelsens bildjobb är klara innan du tar bort den."
+        );
+        for mut job in jobs.clone() {
+            if delete_images {
+                tx.execute("DELETE FROM image_jobs WHERE id=?1", [&job.id])?;
+            } else {
+                job.entry_id = None;
+                job.draft_revision_id = None;
+                tx.execute(
+                    "UPDATE image_jobs SET json=?1 WHERE id=?2",
+                    params![serde_json::to_string(&job)?, job.id],
+                )?;
+            }
+        }
+        for table in [
+            "drafting_jobs",
+            "journal_generations",
+            "journal_drafts",
+            "journal_descriptions",
+        ] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE entry_id=?1"),
+                [entry_id],
+            )?;
+        }
+        tx.execute("DELETE FROM journal_entries WHERE id=?1", [entry_id])?;
+        tx.commit()?;
+        if delete_images {
+            for job in &jobs {
+                match std::fs::remove_dir_all(root.join("images").join(&job.id)) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn save_deleted_image(&self, job: &ImageJob, path: &str) -> Result<()> {
         let mut c = self.connect()?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if job.is_emptied() {
@@ -1103,14 +1167,32 @@ mod tests {
     }
     #[test]
     fn deletion_clears_only_the_matching_favourite() -> Result<()> {
-        let (temp, db, entry, workflow) = fixture()?;
-        let draft = scene(&db, &entry, "Forest")?;
+        let (temp, db, _, workflow) = fixture()?;
+        let (entry, job) = entry_with_image(&temp, &db, "Forest", &workflow)?;
+        let path = std::path::PathBuf::from(&job.images[0].path);
+        db.favourite_image(&entry.id, Some(path.to_string_lossy().into()))?;
+        assert!(db
+            .favourite_image(&entry.id, Some("/foreign".into()))
+            .is_err());
+        db.delete_generated_image(temp.path(), &job.id, &path.to_string_lossy())?;
+        assert!(db.journal_entry(&entry.id)?.favourite_image.is_none());
+        assert!(!path.exists());
+        Ok(())
+    }
+    fn entry_with_image(
+        temp: &tempfile::TempDir,
+        db: &Database,
+        title: &str,
+        workflow: &str,
+    ) -> Result<(JournalEntry, ImageJob)> {
+        let entry = db.save_journal_entry(input(None, title))?;
+        let draft = scene(db, &entry, title)?;
         db.approve_scene(&draft.id)?;
-        let jobs = db.generate_journal_images(&id(), &entry.id, vec![draft.id], &workflow)?;
+        let ids = db.generate_journal_images(&id(), &entry.id, vec![draft.id], workflow)?;
         let mut job = db
             .image_jobs()?
             .into_iter()
-            .find(|j| j.id == jobs[0])
+            .find(|j| j.id == ids[0])
             .unwrap();
         let directory = temp.path().join("images").join(&job.id);
         std::fs::create_dir_all(&directory)?;
@@ -1126,13 +1208,50 @@ mod tests {
             image_type: "output".into(),
         });
         db.save_image_job(&job)?;
-        db.favourite_image(&entry.id, Some(path.to_string_lossy().into()))?;
-        assert!(db
-            .favourite_image(&entry.id, Some("/foreign".into()))
-            .is_err());
-        db.delete_generated_image(temp.path(), &job.id, &path.to_string_lossy())?;
-        assert!(db.journal_entry(&entry.id)?.favourite_image.is_none());
-        assert!(!path.exists());
+        Ok((entry, job))
+    }
+    #[test]
+    fn deleting_an_entry_waits_for_its_image_jobs() -> Result<()> {
+        let (temp, db, _, workflow) = fixture()?;
+        let (entry, job) = entry_with_image(&temp, &db, "Skog", &workflow)?;
+        let error = db
+            .delete_journal_entry(temp.path(), &entry.id, true)
+            .unwrap_err();
+        assert!(error.to_string().contains("bildjobb"));
+        assert!(db.journal_entry(&entry.id).is_ok());
+        assert_eq!(
+            db.image_jobs()?.iter().filter(|j| j.id == job.id).count(),
+            1
+        );
+        Ok(())
+    }
+    #[test]
+    fn deleting_an_entry_keeps_or_deletes_its_images() -> Result<()> {
+        let (temp, db, _, workflow) = fixture()?;
+        let (kept, mut kept_job) = entry_with_image(&temp, &db, "Skog", &workflow)?;
+        let (removed, mut removed_job) = entry_with_image(&temp, &db, "Hav", &workflow)?;
+        for job in [&mut kept_job, &mut removed_job] {
+            job.status = "completed".into();
+            job.release_pending = false;
+            db.save_image_job(job)?;
+        }
+        db.delete_journal_entry(temp.path(), &kept.id, false)?;
+        db.delete_journal_entry(temp.path(), &removed.id, true)?;
+        let snapshot = db.journal_snapshot()?;
+        assert!(snapshot
+            .entries
+            .iter()
+            .all(|e| e.id != kept.id && e.id != removed.id));
+        assert!(snapshot
+            .drafts
+            .iter()
+            .all(|d| d.entry_id != kept.id && d.entry_id != removed.id));
+        let jobs = db.image_jobs()?;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, kept_job.id);
+        assert!(jobs[0].entry_id.is_none());
+        assert!(std::path::Path::new(&kept_job.images[0].path).exists());
+        assert!(!temp.path().join("images").join(&removed_job.id).exists());
         Ok(())
     }
     #[test]

@@ -121,12 +121,13 @@ pub struct ImageJob {
     pub release_pending: bool,
 }
 impl ImageJob {
+    /// The supervisor will not touch a settled job again unless it is followed up.
+    pub(crate) fn is_settled(&self) -> bool {
+        terminal(&self.status) && !self.release_pending
+    }
     /// A settled job whose every image is deleted has nothing left to show or follow up.
     pub(crate) fn is_emptied(&self) -> bool {
-        terminal(&self.status)
-            && !self.release_pending
-            && !self.images.is_empty()
-            && self.images.iter().all(|i| i.deleted)
+        self.is_settled() && !self.images.is_empty() && self.images.iter().all(|i| i.deleted)
     }
 }
 #[derive(Serialize)]

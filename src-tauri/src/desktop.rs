@@ -331,6 +331,18 @@ fn favourite_image(
     state.db.favourite_image(&entry_id, path).map_err(err)
 }
 #[tauri::command]
+fn delete_journal_entry(
+    state: State<'_, AppState>,
+    entry_id: String,
+    delete_images: bool,
+) -> ApiResult<()> {
+    let service = state.inner();
+    service
+        .db
+        .delete_journal_entry(&service.root, &entry_id, delete_images)
+        .map_err(err)
+}
+#[tauri::command]
 fn set_recording_language(
     state: State<'_, AppState>,
     id: String,
@@ -407,6 +419,7 @@ pub fn run() {
             approve_scene,
             generate_journal_images,
             favourite_image,
+            delete_journal_entry,
             set_recording_language,
             save_workflow,
             select_workflow,

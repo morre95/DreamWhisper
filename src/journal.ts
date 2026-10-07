@@ -27,6 +27,17 @@ export function latestDrafts(drafts: SceneDraft[]) {
   return drafts.filter(d => !parents.has(d.id)).sort((a, b) => (b.batch_created_at ?? '').localeCompare(a.batch_created_at ?? '') || (a.position ?? 0) - (b.position ?? 0));
 }
 const today = () => new Date().toLocaleDateString('sv-SE');
+// Resolves to what the person chose to delete, or null when they cancel.
+function chooseRemoval(title: string): Promise<'all' | 'entry' | null> {
+  return new Promise(resolve => {
+    const dialog = document.createElement('dialog');
+    dialog.innerHTML = `<h2>Ta bort upplevelsen?</h2><p>”${esc(title)}” har sparade bilder. Beskrivningar och scenutkast raderas i båda fallen. Originalen i ComfyUI påverkas inte.</p><div class="dialog-actions"><button class="secondary" data-choice="">Avbryt</button><button class="secondary" data-choice="entry">Behåll bilderna</button><button class="primary" data-choice="all">Ta bort allt inklusive bilder</button></div>`;
+    let choice: 'all' | 'entry' | null = null;
+    dialog.querySelectorAll<HTMLButtonElement>('[data-choice]').forEach(b => b.onclick = () => { choice = (b.dataset.choice || null) as typeof choice; dialog.close(); });
+    dialog.onclose = () => { dialog.remove(); resolve(choice); };
+    document.body.append(dialog); dialog.showModal();
+  });
+}
 
 export class JournalView {
   private snapshot: JournalSnapshot | null = null;
@@ -101,7 +112,7 @@ export class JournalView {
       <label>Beskrivning<textarea name="description" rows="8" placeholder="Beskriv det du såg, kände och minns…">${esc(entry.description)}</textarea></label>
       ${entry.recording_id ? '<button type="button" id="entry-source" class="text-button">Öppna källinspelningen</button><p class="muted">Texten är en separat kopia. Granska och rätta den innan du skapar utkast.</p><button type="button" id="confirm-description" class="secondary">Bekräfta den granskade beskrivningen</button>' : ''}
       <label>Mina reflektioner<textarea name="reflections" rows="4" placeholder="Vad kan upplevelsen betyda för mig?">${esc(entry.reflections)}</textarea></label><p class="muted">Reflektionerna sparas separat och används bara när du uttryckligen väljer det nedan.</p>
-      <div class="device-actions"><button class="secondary" type="submit">Spara nu</button><span id="journal-save-status" role="status">Sparad</span></div>
+      <div class="device-actions"><button class="secondary" type="submit">Spara nu</button><span id="journal-save-status" role="status">Sparad</span><button type="button" id="delete-entry" class="text-button">Ta bort upplevelse</button></div>
       <label class="checkbox-label"><input id="include-reflections" type="checkbox" />Ta med mina reflektioner i nästa utkast</label>
       <div class="device-actions"><button type="button" class="primary" id="draft-scenes">Skapa scenutkast</button><span id="confirmation-status" class="muted"></span></div>
     </form><section id="journal-results"></section>`;
@@ -117,6 +128,7 @@ export class JournalView {
       await this.flush(); this.entry = await invoke<JournalEntry>('confirm_description', { id: this.entry!.id, revision: this.entry!.description_revision }); this.updateConfirmation(); await this.refresh();
     }));
     target.querySelector<HTMLButtonElement>('#draft-scenes')!.onclick = () => void this.action(() => this.draft([]));
+    target.querySelector<HTMLButtonElement>('#delete-entry')!.onclick = () => void this.action(() => this.remove());
     this.updateConfirmation(); this.renderResults(true);
   }
   private status(text: string) { const element = this.container.querySelector('#journal-save-status'); if (element) element.textContent = text; }
@@ -159,6 +171,19 @@ export class JournalView {
     // Edits made during an in-flight save must also be durable before navigation/action.
     if (this.entryDirty || this.edits.size) await this.flush();
     await this.refresh();
+  }
+  private async remove() {
+    await this.flush();
+    const e = this.entry!;
+    const hasImages = this.images?.jobs.some(j => j.entry_id === e.id && j.images.some(i => !i.deleted)) ?? false;
+    const choice = hasImages ? await chooseRemoval(e.title) : window.confirm(`Ta bort upplevelsen ”${e.title}”? Beskrivningar och scenutkast raderas.`) ? 'entry' : null;
+    if (!choice) return;
+    await invoke('delete_journal_entry', { entryId: e.id, deleteImages: choice === 'all' });
+    this.entry = null; this.selected.clear(); this.edits.clear(); this.signature = '';
+    await this.refresh();
+    this.entry = this.snapshot?.entries[0] ?? null;
+    this.renderEditor(); this.renderList();
+    this.notify(choice === 'all' ? 'Upplevelsen och dess bilder har tagits bort.' : 'Upplevelsen har tagits bort. Bilderna finns kvar under Bilder.');
   }
   private async draft(sceneIds: string[]) {
     await this.flush();
