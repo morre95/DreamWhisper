@@ -14,7 +14,7 @@ export interface SceneDraft {
   scene: Scene; prompt: string; negative_prompt: string | null; manual: boolean; approved: boolean;
   position?: number; batch_created_at?: string; scene_ids: string[]; arrangement: string; provenance: unknown; created_at: string;
 }
-interface DraftingJob { id: string; entry_id: string; status: string; error: string | null; description_revision: string; result_ids: string[] }
+interface DraftingJob { id: string; entry_id: string; status: string; error: string | null; description_revision: string; result_ids: string[]; scene_ids: string[]; selected_text?: string | null }
 interface DraftingSettings { binary_path: string; model_path: string }
 interface DescriptionRevision { id: string; entry_id: string; description: string; language: string; created_at: string }
 interface JournalSnapshot { entries: JournalEntry[]; drafts: SceneDraft[]; jobs: DraftingJob[]; descriptions: DescriptionRevision[]; settings: DraftingSettings; setup_ready: boolean }
@@ -110,6 +110,7 @@ export class JournalView {
       <label>Titel<input name="title" required value="${esc(entry.title)}" /></label>
       <div class="journal-metadata"><label>Datum<input name="date" type="date" required value="${esc(entry.date)}" /></label><label>Upplevelse<select name="kind"><option value="dream" ${entry.kind === 'dream' ? 'selected' : ''}>Dröm</option><option value="meditation" ${entry.kind === 'meditation' ? 'selected' : ''}>Meditation</option></select></label><label>Beskrivningens språk<select name="language"><option value="sv" ${entry.language === 'sv' ? 'selected' : ''}>Svenska</option><option value="en" ${entry.language === 'en' ? 'selected' : ''}>English</option></select></label></div>
       <label>Beskrivning<textarea name="description" rows="8" placeholder="Beskriv det du såg, kände och minns…">${esc(entry.description)}</textarea></label>
+      <div id="draft-selection-actions" class="device-actions hidden"><button type="button" id="draft-selection" class="secondary" disabled>Skapa scenutkast från markering</button></div><p id="draft-selection-hint" class="muted">Markera text i beskrivningen för att skapa ett scenutkast från den delen.</p>
       ${entry.recording_id ? '<button type="button" id="entry-source" class="text-button">Öppna källinspelningen</button><p class="muted">Texten är en separat kopia. Granska och rätta den innan du skapar utkast.</p><button type="button" id="confirm-description" class="secondary">Bekräfta den granskade beskrivningen</button>' : ''}
       <label>Mina reflektioner<textarea name="reflections" rows="4" placeholder="Vad kan upplevelsen betyda för mig?">${esc(entry.reflections)}</textarea></label><p class="muted">Reflektionerna sparas separat och används bara när du uttryckligen väljer det nedan.</p>
       <div class="device-actions"><button class="secondary" type="submit">Spara nu</button><span id="journal-save-status" role="status">Sparad</span><button type="button" id="delete-entry" class="text-button">Ta bort upplevelse</button></div>
@@ -128,10 +129,22 @@ export class JournalView {
       await this.flush(); this.entry = await invoke<JournalEntry>('confirm_description', { id: this.entry!.id, revision: this.entry!.description_revision }); this.updateConfirmation(); await this.refresh();
     }));
     target.querySelector<HTMLButtonElement>('#draft-scenes')!.onclick = () => void this.action(() => this.draft([]));
+    const description = form.querySelector<HTMLTextAreaElement>('[name="description"]')!;
+    description.onselect = description.onkeyup = description.onmouseup = () => this.updateConfirmation();
+    const selectionButton = target.querySelector<HTMLButtonElement>('#draft-selection')!;
+    selectionButton.onmousedown = event => event.preventDefault();
+    selectionButton.onclick = () => {
+      const text = this.descriptionSelection();
+      if (text.trim()) void this.action(() => this.draft([], text));
+    };
     target.querySelector<HTMLButtonElement>('#delete-entry')!.onclick = () => void this.action(() => this.remove());
     this.updateConfirmation(); this.renderResults(true);
   }
   private status(text: string) { const element = this.container.querySelector('#journal-save-status'); if (element) element.textContent = text; }
+  private descriptionSelection() {
+    const description = this.container.querySelector<HTMLTextAreaElement>('[name="description"]');
+    return description?.value.slice(description.selectionStart, description.selectionEnd) ?? '';
+  }
   private updateConfirmation() {
     const e = this.entry; if (!e) return;
     const form = this.container.querySelector<HTMLFormElement>('#journal-form'); if (!form) return;
@@ -139,6 +152,15 @@ export class JournalView {
     const confirmed = e.confirmed_revision === e.description_revision && body.get('description') === e.description && body.get('language') === e.language;
     const label = this.container.querySelector('#confirmation-status'); if (label) label.textContent = confirmed ? 'Beskrivningen är redo för utkast' : 'Bekräfta beskrivningen före utkast';
     this.container.querySelector<HTMLButtonElement>('#draft-scenes')!.disabled = !confirmed || !String(body.get('description')).trim();
+    const hasSelection = !!this.descriptionSelection().trim();
+    const selectionButton = this.container.querySelector<HTMLButtonElement>('#draft-selection');
+    if (selectionButton) selectionButton.disabled = !confirmed || !hasSelection;
+    this.container.querySelector('#draft-selection-actions')?.classList.toggle('hidden', !hasSelection);
+    const hint = this.container.querySelector('#draft-selection-hint');
+    if (hint) {
+      hint.classList.toggle('hidden', hasSelection && confirmed);
+      hint.textContent = hasSelection ? 'Bekräfta beskrivningen för att skapa ett scenutkast från markeringen.' : 'Markera text i beskrivningen för att skapa ett scenutkast från den delen.';
+    }
   }
   async flush() {
     clearTimeout(this.timer);
@@ -185,13 +207,13 @@ export class JournalView {
     this.renderEditor(); this.renderList();
     this.notify(choice === 'all' ? 'Upplevelsen och dess bilder har tagits bort.' : 'Upplevelsen har tagits bort. Bilderna finns kvar under Bilder.');
   }
-  private async draft(sceneIds: string[]) {
+  private async draft(sceneIds: string[], selectedText: string | null = null) {
     await this.flush();
     const e = this.entry!;
     const include = this.container.querySelector<HTMLInputElement>('#include-reflections')?.checked ?? false;
-    const key = JSON.stringify([e.id, e.description_revision, include ? e.reflections : null, sceneIds]);
+    const key = JSON.stringify([e.id, e.description_revision, include ? e.reflections : null, sceneIds, selectedText]);
     if (this.draftRequest?.key !== key) this.draftRequest = { key, id: crypto.randomUUID() };
-    await invoke('request_drafting', { requestId: this.draftRequest!.id, entryId: e.id, revision: e.description_revision, includeReflections: include, sceneIds });
+    await invoke('request_drafting', { requestId: this.draftRequest!.id, entryId: e.id, revision: e.description_revision, includeReflections: include, sceneIds, selectedText });
     this.draftRequest = null;
     const checkbox = this.container.querySelector<HTMLInputElement>('#include-reflections'); if (checkbox) checkbox.checked = false;
     this.notify('Scenutkastet har lagts i kön.'); await this.refresh();
@@ -226,7 +248,7 @@ export class JournalView {
       <div class="device-actions"><button id="combine-scenes" class="secondary">Kombinera valda scener</button><button id="generate-all-scenes" class="primary">Generera alla scener separat</button></div>
       <div id="scene-cards">${current.map(d => this.card(d)).join('') || '<p class="muted">Skapa scenutkast eller skriv en egen prompt nedan.</p>'}</div>
       <details><summary>Skriv en egen scenprompt</summary><label>Engelsk bildprompt<textarea id="manual-prompt" rows="4"></textarea></label><button id="manual-scene" class="secondary">Spara scen för granskning</button></details>
-      <section><h3>Utkastjobb</h3>${jobs.map(j => `<article class="settings-card"><b>${esc(({ queued: 'I kön', running: 'Skapar utkast', completed: 'Klart', failed: 'Misslyckat' } as Record<string, string>)[j.status] ?? j.status)}</b>${j.description_revision !== e.description_revision ? '<p class="muted">Tillhör en tidigare beskrivning.</p>' : ''}${j.error ? `<p class="inline-error">${esc(j.error)}</p><button data-retry-draft="${esc(j.id)}" class="secondary small">Försök igen</button>` : ''}</article>`).join('') || '<p class="muted">Inga utkastjobb ännu.</p>'}</section>
+      <section><h3>Utkastjobb</h3>${jobs.map(j => `<article class="settings-card"><b>${esc(({ queued: 'I kön', running: 'Skapar utkast', completed: 'Klart', failed: 'Misslyckat' } as Record<string, string>)[j.status] ?? j.status)}</b>${j.selected_text ? `<details><summary>Markerad text</summary><p class="image-prompt-preview">${esc(j.selected_text)}</p></details>` : ''}${j.description_revision !== e.description_revision ? '<p class="muted">Tillhör en tidigare beskrivning.</p>' : ''}${j.error ? `<p class="inline-error">${esc(j.error)}</p><button data-retry-draft="${esc(j.id)}" class="secondary small">Försök igen</button>` : ''}</article>`).join('') || '<p class="muted">Inga utkastjobb ännu.</p>'}</section>
       <section><h3>Bilder och försök</h3>${images.map(job => `<article class="settings-card"><b>${esc(job.config.workflow_name)} · ${esc(({queued:'I kön',submitting:'Skickar',queued_comfy:'I ComfyUI-kön',running:'Skapar bild',downloading:'Hämtar',completed:'Klar',failed:'Misslyckad',uncertain:'Osäker'} as Record<string,string>)[job.status] ?? job.status)}</b>${job.error ? `<p class="inline-error">${esc(job.error)}</p>` : ''}<details><summary>Exakt bildprompt och flöde</summary><p class="image-prompt-preview">${esc(job.draft.prompt)}</p><p>${esc(job.draft.negative_prompt ?? '')}</p><pre>${esc(JSON.stringify(job.config.workflow, null, 2))}</pre></details><div class="image-gallery">${job.images.filter(i => !i.deleted).map(i => `<div><button class="image-thumbnail" data-preview="${esc(i.path)}"><img src="${esc(convertFileSrc(i.path))}" alt="${esc(job.draft.prompt)}" loading="lazy" /></button><button class="secondary small" data-favourite="${esc(i.path)}">${e.favourite_image === i.path ? '★ Favorit · avmarkera' : '☆ Välj favorit'}</button><button class="text-button" data-delete-image="${esc(i.path)}" data-job="${esc(job.id)}">Ta bort bild</button></div>`).join('')}</div>${job.prompt_id && ['failed','uncertain'].includes(job.status) && !job.release_pending ? `<button data-follow-image="${esc(job.id)}" class="secondary small">Följ upp / hämta igen</button>` : ''}${job.release_pending && job.error ? `<button data-dismiss-image="${esc(job.id)}" class="secondary small">Avsluta uppföljning</button>` : ''}</article>`).join('') || '<p class="muted">Inga bilder ännu.</p>'}</section>
       <details><summary>Tidigare beskrivningar och utkast</summary>${revisions.map(r => `<article><b>${esc(new Date(r.created_at).toLocaleString('sv-SE'))} · ${esc(r.language)}</b><p class="image-prompt-preview">${esc(r.description)}</p></article>`).join('')}${drafts.filter(d => !current.some(c => c.id === d.id)).map(d => `<article><b>${esc(d.scene.title)} · ${esc(new Date(d.created_at).toLocaleString('sv-SE'))}</b><p class="image-prompt-preview">${esc(d.prompt)}</p></article>`).join('')}</details></div>`;
     target.querySelector<HTMLButtonElement>('#journal-add-workflow')!.onclick = () => {
@@ -242,8 +264,7 @@ export class JournalView {
     current.forEach(d => this.bindCard(target, d));
     target.querySelectorAll<HTMLButtonElement>('[data-retry-draft]').forEach(b => b.onclick = () => void this.action(async () => {
       const job = this.snapshot!.jobs.find(j => j.id === b.dataset.retryDraft)!;
-      const raw = job as DraftingJob & { scene_ids: string[] };
-      await this.draft(raw.scene_ids.map(key => this.resolve(key)));
+      await this.draft(job.scene_ids.map(key => this.resolve(key)), job.selected_text ?? null);
     }));
     target.querySelectorAll<HTMLButtonElement>('[data-favourite]').forEach(b => b.onclick = () => void this.action(async () => {
       await this.flush(); this.entry = await invoke('favourite_image', { entryId: e.id, path: this.entry!.favourite_image === b.dataset.favourite ? null : b.dataset.favourite }); await this.refresh();

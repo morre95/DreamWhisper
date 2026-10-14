@@ -431,6 +431,7 @@ pub(crate) fn fixture(scenario: &str) -> Result<(tempfile::TempDir, DraftingJob)
         error: None,
         description_revision: "revision".into(),
         description: "En skog både inne och ute".into(),
+        selected_text: None,
         language: "sv".into(),
         reflections: None,
         scene_ids: vec![],

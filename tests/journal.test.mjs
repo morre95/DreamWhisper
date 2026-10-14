@@ -34,14 +34,70 @@ function editor() {
   const values = { title: 'Dream', date: '2026-10-06', kind: 'dream', language: 'sv', description: 'Changed', reflections: 'Private' };
   const form = { values };
   const status = { textContent: '' }; const confirm = { textContent: '' }; const button = { disabled: false };
-  const container = { querySelector: selector => ({ '#journal-form': form, '#journal-save-status': status, '#confirmation-status': confirm, '#draft-scenes': button })[selector] ?? null };
+  const selectionButton = { disabled: true };
+  const description = { get value() { return values.description; }, selectionStart: 0, selectionEnd: 0 };
+  const container = { querySelector: selector => ({ '#journal-form': form, '#journal-save-status': status, '#confirmation-status': confirm, '#draft-scenes': button, '#draft-selection': selectionButton, '[name="description"]': description })[selector] ?? null };
   const view = new JournalView(container, () => {}, () => {});
   view.entry = state.entry; view.entryDirty = true; view.editSequence = 1;
   view.snapshot = { ...state, entries: [state.entry] };
   const original = globalThis.FormData;
   globalThis.FormData = class { constructor(form) { this.data = { ...form.values }; } get(key) { return this.data[key]; } };
-  return { view, state, values, status, restore: () => { globalThis.FormData = original; } };
+  return { view, state, values, status, description, selectionButton, restore: () => { globalThis.FormData = original; } };
 }
+
+test('selection drafting requires nonblank text in a confirmed description', () => {
+  const { view, values, description, selectionButton, restore } = editor();
+  try {
+    values.description = 'Original';
+    view.updateConfirmation(); assert.equal(selectionButton.disabled, true);
+    description.selectionEnd = 4;
+    view.updateConfirmation(); assert.equal(selectionButton.disabled, false);
+    assert.equal(view.descriptionSelection(), 'Orig');
+    view.entry.confirmed_revision = null;
+    view.updateConfirmation(); assert.equal(selectionButton.disabled, true);
+    view.entry.confirmed_revision = 'revision';
+    values.description = 'Changed';
+    view.updateConfirmation(); assert.equal(selectionButton.disabled, true);
+    view.entry.description = values.description = '   ';
+    description.selectionEnd = 3;
+    view.updateConfirmation(); assert.equal(selectionButton.disabled, true);
+  } finally { restore(); }
+});
+
+test('selection is captured before autosave and remains scoped when a request is retried', async () => {
+  const { view, state, values, description, restore } = editor();
+  values.description = 'En skog 🌲.\nSedan ett hus.';
+  description.selectionStart = values.description.indexOf('Sedan');
+  description.selectionEnd = values.description.length;
+  const selection = view.descriptionSelection();
+  const requests = []; let fail = true;
+  handle = async (command, args) => {
+    if (command === 'journal_snapshot') return { ...state, entries: [state.entry] };
+    if (command === 'image_snapshot') return { jobs: [], workflows: [], settings: {} };
+    if (command === 'save_journal_entry') {
+      state.entry = { ...state.entry, ...args.input, version: 2, description_revision: 'saved-revision', confirmed_revision: 'saved-revision' };
+      // Losing focus while saving must not change the already captured selection.
+      description.selectionStart = description.selectionEnd;
+      return state.entry;
+    }
+    assert.equal(command, 'request_drafting'); requests.push(args);
+    if (fail) throw new Error('connection lost');
+  };
+  try {
+    await assert.rejects(view.draft([], selection), /connection lost/);
+    assert.equal(requests[0].selectedText, 'Sedan ett hus.');
+    assert.equal(requests[0].revision, 'saved-revision');
+    assert.equal(requests[0].entryId, 'entry');
+    assert.equal(requests[0].includeReflections, false);
+    fail = false; await view.draft([], selection);
+    assert.equal(requests[1].requestId, requests[0].requestId);
+    await view.draft([], 'En skog 🌲.');
+    assert.notEqual(requests[2].requestId, requests[1].requestId);
+    assert.equal(requests[2].selectedText, 'En skog 🌲.');
+    await view.draft([]); assert.equal(requests[3].selectedText, null);
+    assert.equal(view.entry.description, values.description);
+  } finally { restore(); }
+});
 
 test('autosaves serialize revisions and persist edits made during an in-flight save', async () => {
   const { view, state, values, restore } = editor(); const writes = []; let finish;

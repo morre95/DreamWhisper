@@ -274,6 +274,7 @@ fn request_drafting(
     revision: String,
     include_reflections: bool,
     scene_ids: Vec<String>,
+    selected_text: Option<String>,
 ) -> ApiResult<String> {
     state
         .db
@@ -283,6 +284,7 @@ fn request_drafting(
             &revision,
             include_reflections,
             scene_ids,
+            selected_text,
         )
         .map_err(err)
 }

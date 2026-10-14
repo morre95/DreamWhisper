@@ -153,6 +153,8 @@ pub struct DraftingJob {
     pub error: Option<String>,
     pub description_revision: String,
     pub description: String,
+    #[serde(default)]
+    pub selected_text: Option<String>,
     pub language: String,
     pub reflections: Option<String>,
     pub scene_ids: Vec<String>,
@@ -414,6 +416,7 @@ impl Database {
         revision: &str,
         include_reflections: bool,
         scene_ids: Vec<String>,
+        selected_text: Option<String>,
     ) -> Result<String> {
         ensure!(
             uuid::Uuid::parse_str(request_id).is_ok(),
@@ -422,6 +425,10 @@ impl Database {
         ensure!(
             scene_ids.is_empty() || (2..=50).contains(&scene_ids.len()),
             "Välj minst två scener att kombinera"
+        );
+        ensure!(
+            selected_text.is_none() || scene_ids.is_empty(),
+            "Textmarkering kan inte kombineras med valda scener"
         );
         let mut c = self.connect()?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -438,7 +445,8 @@ impl Database {
                 job.entry_id == entry_id
                     && job.description_revision == revision
                     && job.reflections.is_some() == include_reflections
-                    && job.scene_ids == scene_ids,
+                    && job.scene_ids == scene_ids
+                    && job.selected_text == selected_text,
                 "Begäran-ID används redan för ett annat utkast"
             );
             return Ok(request_id.into());
@@ -453,6 +461,12 @@ impl Database {
             !entry.description.trim().is_empty(),
             "Beskriv upplevelsen först"
         );
+        if let Some(text) = &selected_text {
+            ensure!(
+                !text.trim().is_empty() && entry.description.contains(text),
+                "Markera text i den aktuella beskrivningen först"
+            );
+        }
         let mut scenes = vec![];
         for key in &scene_ids {
             ensure_latest(&tx, key)?;
@@ -475,7 +489,8 @@ impl Database {
             status: "queued".into(),
             error: None,
             description_revision: revision.into(),
-            description: entry.description,
+            description: selected_text.clone().unwrap_or(entry.description),
+            selected_text,
             language: entry.language,
             reflections: include_reflections.then_some(entry.reflections),
             scene_ids,
@@ -975,6 +990,161 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn selected_text_drafting_keeps_the_entry_and_uses_only_the_selection() -> Result<()> {
+        let (temp, db, entry, _) = fixture()?;
+        let selected = "både inne och ute";
+        let request = id();
+        db.request_drafting(
+            &request,
+            &entry.id,
+            &entry.description_revision,
+            false,
+            vec![],
+            Some(selected.into()),
+        )?;
+        assert_eq!(
+            db.request_drafting(
+                &request,
+                &entry.id,
+                &entry.description_revision,
+                false,
+                vec![],
+                Some(selected.into()),
+            )?,
+            request
+        );
+        assert!(db
+            .request_drafting(
+                &request,
+                &entry.id,
+                &entry.description_revision,
+                false,
+                vec![],
+                Some("En skog".into()),
+            )
+            .is_err());
+        assert!(db
+            .request_drafting(
+                &request,
+                &entry.id,
+                &entry.description_revision,
+                false,
+                vec![],
+                None,
+            )
+            .is_err());
+        let job = db.claim_drafting()?.unwrap();
+        assert_eq!(job.description, selected);
+        assert_eq!(job.selected_text.as_deref(), Some(selected));
+        assert_eq!(job.description_revision, entry.description_revision);
+        assert!(job.reflections.is_none());
+        let messages = crate::drafting::messages(&job);
+        let source: serde_json::Value =
+            serde_json::from_str(messages[1]["content"].as_str().unwrap())?;
+        assert_eq!(source["description"], selected);
+        let output = scene_from_output(
+            &job,
+            Scene {
+                title: "Inne och ute".into(),
+                summary: selected.into(),
+                details: vec![Detail {
+                    text: selected.into(),
+                    quote: Some(selected.into()),
+                    english: "Both indoors and outdoors".into(),
+                }],
+                additions: vec![],
+                questions: vec![],
+            },
+            String::new(),
+            json!({}),
+        )?;
+        db.finish_drafting(job, Ok(vec![output]))?;
+        let snapshot = Database::open(temp.path())?.journal_snapshot()?;
+        assert_eq!(snapshot.entries[0].description, entry.description);
+        assert_eq!(snapshot.descriptions.len(), 1);
+        assert_eq!(snapshot.jobs[0].selected_text.as_deref(), Some(selected));
+        assert_eq!(snapshot.drafts[0].entry_id, entry.id);
+        assert_eq!(
+            snapshot.drafts[0].description_revision,
+            entry.description_revision
+        );
+        assert_eq!(
+            snapshot.drafts[0].scene.details[0].quote.as_deref(),
+            Some(selected)
+        );
+        Ok(())
+    }
+    #[test]
+    fn selected_text_drafting_rejects_empty_foreign_stale_and_combined_inputs() -> Result<()> {
+        let (_temp, db, entry, _) = fixture()?;
+        for selected in ["", "   ", "En annan dröm"] {
+            assert!(db
+                .request_drafting(
+                    &id(),
+                    &entry.id,
+                    &entry.description_revision,
+                    false,
+                    vec![],
+                    Some(selected.into()),
+                )
+                .is_err());
+        }
+        let one = scene(&db, &entry, "Forest")?;
+        let two = scene(&db, &entry, "House")?;
+        assert!(db
+            .request_drafting(
+                &id(),
+                &entry.id,
+                &entry.description_revision,
+                false,
+                vec![one.id, two.id],
+                Some("En skog".into()),
+            )
+            .is_err());
+        let changed = db.save_journal_entry(input(Some(&entry), "Ny text"))?;
+        assert!(db
+            .request_drafting(
+                &id(),
+                &entry.id,
+                &entry.description_revision,
+                false,
+                vec![],
+                Some("En skog".into()),
+            )
+            .is_err());
+        assert!(db
+            .request_drafting(
+                &id(),
+                &entry.id,
+                &changed.description_revision,
+                false,
+                vec![],
+                Some("En skog".into()),
+            )
+            .is_err());
+        assert!(db.journal_snapshot()?.jobs.is_empty());
+        Ok(())
+    }
+    #[test]
+    fn legacy_drafting_jobs_without_selection_still_load() -> Result<()> {
+        let (_temp, db, entry, _) = fixture()?;
+        db.request_drafting(
+            &id(),
+            &entry.id,
+            &entry.description_revision,
+            false,
+            vec![],
+            None,
+        )?;
+        let job = db.claim_drafting()?.unwrap();
+        let mut legacy = serde_json::to_value(&job)?;
+        legacy.as_object_mut().unwrap().remove("selected_text");
+        let loaded: DraftingJob = serde_json::from_value(legacy)?;
+        assert!(loaded.selected_text.is_none());
+        assert_eq!(loaded.description, entry.description);
+        Ok(())
+    }
+    #[test]
     fn reflections_are_opt_in_and_drafting_inputs_are_snapshots() -> Result<()> {
         let (_temp, db, entry, _) = fixture()?;
         let first = id();
@@ -984,6 +1154,7 @@ mod tests {
             &entry.description_revision,
             false,
             vec![],
+            None,
         )?;
         assert_eq!(
             db.request_drafting(
@@ -991,7 +1162,8 @@ mod tests {
                 &entry.id,
                 &entry.description_revision,
                 false,
-                vec![]
+                vec![],
+                None,
             )?,
             first
         );
@@ -1004,6 +1176,7 @@ mod tests {
             &entry.description_revision,
             true,
             vec![],
+            None,
         )?;
         let job2 = db.claim_drafting()?.unwrap();
         assert_eq!(job2.reflections, Some(entry.reflections.clone()));
@@ -1056,7 +1229,8 @@ mod tests {
                 &unconfirmed.id,
                 &unconfirmed.description_revision,
                 false,
-                vec![]
+                vec![],
+                None,
             )
             .is_err());
         let confirmed =
@@ -1067,6 +1241,7 @@ mod tests {
             &confirmed.description_revision,
             false,
             vec![],
+            None,
         )?;
         let mut edit = input(Some(&confirmed), &confirmed.description);
         edit.recording_id = confirmed.recording_id;
@@ -1149,7 +1324,8 @@ mod tests {
                 &entry.id,
                 &entry.description_revision,
                 false,
-                vec![one.id.clone(), foreign.id]
+                vec![one.id.clone(), foreign.id],
+                None,
             )
             .is_err());
         db.request_drafting(
@@ -1158,6 +1334,7 @@ mod tests {
             &entry.description_revision,
             false,
             vec![one.id.clone(), two.id.clone()],
+            None,
         )?;
         let job = db.claim_drafting()?.unwrap();
         assert_eq!(job.scenes.len(), 2);
@@ -1258,7 +1435,14 @@ mod tests {
     fn interrupted_drafting_is_recoverable_without_overwriting_history() -> Result<()> {
         let (temp, db, entry, _) = fixture()?;
         scene(&db, &entry, "Existing prompt")?;
-        db.request_drafting(&id(), &entry.id, &entry.description_revision, false, vec![])?;
+        db.request_drafting(
+            &id(),
+            &entry.id,
+            &entry.description_revision,
+            false,
+            vec![],
+            None,
+        )?;
         db.claim_drafting()?;
         let reopened = Database::open(temp.path())?;
         let snapshot = reopened.journal_snapshot()?;

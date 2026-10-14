@@ -37,6 +37,7 @@ fn main() -> Result<()> {
         &entry.description_revision,
         false,
         vec![],
+        None,
     )?;
     let job = db.claim_drafting()?.context("No drafting job")?;
     let started = std::time::Instant::now();
@@ -68,6 +69,7 @@ fn main() -> Result<()> {
             &entry.description_revision,
             false,
             snapshot.drafts.iter().map(|d| d.id.clone()).collect(),
+            None,
         )?;
         let combination = db.claim_drafting()?.context("No composition job")?;
         let result = drafting::run(&combination, temp.path(), &AtomicBool::new(false));
