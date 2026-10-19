@@ -2,11 +2,14 @@ import { invoke, convertFileSrc, isTauri } from '@tauri-apps/api/core';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { JournalView } from './journal';
 import { ArchiveAudio } from './audio';
+import { ArchiveImages } from './archive-images';
 import { ImagesView, selectedText } from './images';
 import type { Device, ImportReport, Recording, Run, Settings, Snapshot, Transcript } from './types';
 import './style.css';
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
+const archiveImages = new ArchiveImages(document.body);
+window.addEventListener('pagehide', () => archiveImages.dispose());
 const icons = {
   wave: '<svg viewBox="0 0 32 32" fill="none" aria-hidden="true"><path d="M5 13v6m5-10v14m6-19v24m6-19v14m5-10v6" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>',
   library: '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3" stroke="currentColor" stroke-width="1.6"/><path d="M4 10h16M10 10v10" stroke="currentColor" stroke-width="1.6"/></svg>',

@@ -209,12 +209,12 @@ export class ImagesView {
     })());
   }
   private thumbnail(image: GeneratedImage, job: ImageJob) {
-    return `<button class="image-thumbnail" data-preview-path="${this.esc(image.path)}" aria-label="Visa bilden större"><img src="${this.esc(convertFileSrc(image.path))}" loading="lazy" alt="${this.esc(job.draft.prompt)}" /></button>`;
+    return `<button class="image-thumbnail" data-preview-path="${this.esc(image.path)}" aria-label="Visa bilden större"><img data-archive-src="${this.esc(convertFileSrc(image.path))}" loading="lazy" alt="${this.esc(job.draft.prompt)}" /></button>`;
   }
   private bindPreviews(target: HTMLElement) {
     target.querySelectorAll<HTMLButtonElement>('[data-preview-path]').forEach(button => button.onclick = () => {
       const dialog = document.createElement('dialog'); dialog.className = 'image-preview-dialog';
-      dialog.innerHTML = `<button class="secondary">Stäng</button><img src="${this.esc(convertFileSrc(button.dataset.previewPath!))}" alt="Skapad bild" />`;
+      dialog.innerHTML = `<button class="secondary">Stäng</button><img data-archive-src="${this.esc(convertFileSrc(button.dataset.previewPath!))}" alt="Skapad bild" />`;
       dialog.querySelector('button')!.onclick = () => dialog.close(); dialog.onclose = () => dialog.remove();
       document.body.append(dialog); dialog.showModal();
     });
