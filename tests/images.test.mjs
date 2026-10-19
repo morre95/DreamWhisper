@@ -21,10 +21,11 @@ const view = () => new ImagesView({}, () => null, () => {}, () => {});
 test('seed controls keep 64-bit values exact, randomize on request, reset, and flag unsupported flows', () => {
   const workflow = { '3': { inputs: { seed: 123 } } };
   const input = { value: '', setCustomValidity(value) { this.error = value; }, setAttribute(name, value) { this[name] = value; } };
-  const random = {}, reset = {}, hint = {};
-  const container = { querySelector: selector => ({ '#seed': input, '#seed-random': random, '#seed-reset': reset, '#seed-hint': hint })[selector] };
+  const random = {}, reset = {}, hint = {}, automatic = { checked: false };
+  const container = { querySelector: selector => ({ '#seed': input, '#seed-automatic': automatic, '#seed-random': random, '#seed-reset': reset, '#seed-hint': hint })[selector] };
   let value = '';
-  const control = new SeedControl(container, 'seed', next => { value = next; control.update(workflow, value); });
+  let randomize = false;
+  const control = new SeedControl(container, 'seed', (next, enabled) => { value = next; randomize = enabled; control.update(workflow, value, enabled); });
   control.update(workflow, value);
   input.value = '18446744073709551615'; input.oninput();
   assert.equal(value, '18446744073709551615'); assert.equal(input.error, '');
@@ -34,6 +35,15 @@ test('seed controls keep 64-bit values exact, randomize on request, reset, and f
   reset.onclick(); assert.equal(value, ''); assert.equal(input.value, '');
   input.value = '-1'; input.oninput(); assert.match(input.error, /heltal/);
   input.value = '0'; input.oninput(); assert.equal(input.error, '');
+  automatic.checked = true; automatic.onchange();
+  assert.equal(randomize, true); assert.equal(input.disabled, true); assert.equal(random.disabled, true);
+  assert.match(hint.textContent, /varje scen/);
+  automatic.checked = false; automatic.onchange();
+  assert.equal(randomize, false); assert.equal(input.disabled, false); assert.equal(input.value, '0');
+  automatic.checked = true; automatic.onchange(); reset.onclick();
+  assert.equal(automatic.checked, false); assert.equal(value, '');
+  assert.equal(seedError('-1', workflow, true), '');
+  assert.match(seedError('', {}, true), /Avmarkera/);
   control.update({ '3': { inputs: { seed: ['4', 0] } } }, '0');
   assert.equal(random.disabled, true); assert.equal(reset.disabled, false); assert.match(hint.textContent, /saknar/);
   for (const invalid of ['1.5', '1e3', '+1', '18446744073709551616']) assert.match(seedError(invalid, workflow), /heltal/);
@@ -82,6 +92,24 @@ test('lists explicit text inputs without selecting a positive or negative node a
   assert.throws(() => workflowFields({ nodes: [], links: [] }), /API/);
 });
 
+test('automatic seed choice is restored from the image draft and sent on every generation', async () => {
+  const state = snapshot('Same prompt');
+  state.draft.randomize_seed = true;
+  state.workflows = [{ id: 'flow', workflow: { '3': { inputs: { seed: 123 } } } }];
+  state.settings.selected_workflow_id = 'flow';
+  const button = {}, writes = [];
+  const editor = new ImagesView({ querySelector: selector => selector === '#generate-image' ? button : null }, () => null, () => {}, () => {});
+  handle = async (command, args) => {
+    if (command === 'image_snapshot') return state;
+    assert.equal(command, 'create_image'); writes.push(args);
+  };
+  await editor.refresh();
+  assert.equal(editor.draft.randomize_seed, true);
+  await editor.create(); await editor.create();
+  assert.equal(writes.length, 2);
+  assert.ok(writes.every(args => args.draft.randomize_seed && args.draft.seed === null && args.draft.prompt === 'Same prompt'));
+});
+
 test('captures selections across paragraphs but rejects selections outside the transcript', () => {
   const first = {}, last = {}, outside = {};
   const container = { contains: node => node === first || node === last };
@@ -100,7 +128,7 @@ test('selected corrected text is persisted as an independent draft with its sour
   };
   const editor = view(); await editor.refresh();
   assert.equal(await editor.fromSelection('Rättad text med detaljer', 'recording', 'version'), true);
-  assert.deepEqual(writes[0], { prompt: 'Rättad text med detaljer', negative_prompt: null, seed: null, source_text: 'Rättad text med detaljer', recording_id: 'recording', run_id: 'version' });
+  assert.deepEqual(writes[0], { prompt: 'Rättad text med detaljer', negative_prompt: null, seed: null, randomize_seed: false, source_text: 'Rättad text med detaljer', recording_id: 'recording', run_id: 'version' });
   // No save_segment call, and a later polling snapshot cannot overwrite the draft.
   await editor.refresh(); await editor.persist(); assert.equal(writes.length, 1);
 });

@@ -91,6 +91,8 @@ pub struct ImageDraft {
     // Keep the full u64 range exact across the JavaScript/JSON boundary.
     #[serde(default)]
     pub seed: Option<String>,
+    #[serde(default)]
+    pub randomize_seed: bool,
     pub source_text: String,
     pub recording_id: Option<String>,
     pub run_id: Option<String>,
@@ -384,6 +386,10 @@ impl Database {
         }
         config.workflow =
             build_prompt_with_negative(&config, &draft.prompt, draft.negative_prompt.as_deref())?;
+        if draft.randomize_seed {
+            // Resolve once when queuing; recovery and downloads reuse this exact workflow.
+            draft.seed = Some((uuid::Uuid::new_v4().as_u128() as u64).to_string());
+        }
         draft.seed = apply_seed(&mut config.workflow, draft.seed.as_deref())?;
         draft.negative_prompt = config.negative_field.as_ref().and_then(|field| {
             config
@@ -1425,6 +1431,7 @@ for line in sys.stdin:
         )?;
         assert!(draft.negative_prompt.is_none());
         assert!(draft.seed.is_none());
+        assert!(!draft.randomize_seed);
         Ok(())
     }
     #[test]
@@ -1456,6 +1463,57 @@ for line in sys.stdin:
             Some("legacy")
         );
         assert_eq!(db.saved_workflows()?[0].workflow, config.workflow);
+        Ok(())
+    }
+    #[test]
+    fn automatic_seed_is_resolved_per_job_and_survives_restart() -> Result<()> {
+        let (temp, db, original) = fixture()?;
+        let draft = ImageDraft {
+            prompt: "samma prompt".into(),
+            seed: Some("ignored fixed seed".into()),
+            randomize_seed: true,
+            ..Default::default()
+        };
+        db.save_image_draft(&draft)?;
+        let first = db.enqueue_image(draft.clone())?;
+        let second = db.enqueue_image(draft)?;
+        let reopened = Database::open(temp.path())?;
+        assert!(reopened.image_draft()?.randomize_seed);
+        let jobs = reopened.image_jobs()?;
+        let one = jobs.iter().find(|j| j.id == first).unwrap();
+        let two = jobs.iter().find(|j| j.id == second).unwrap();
+        assert_ne!(one.draft.seed, two.draft.seed);
+        for job in [one, two] {
+            assert!(job.draft.randomize_seed);
+            assert_eq!(
+                job.config.workflow["3"]["inputs"]["seed"].as_u64(),
+                Some(job.draft.seed.as_ref().unwrap().parse()?)
+            );
+            assert_eq!(job.draft.prompt, "samma prompt");
+        }
+        assert_eq!(
+            reopened.comfy_settings()?.workflow["3"]["inputs"]["seed"],
+            123
+        );
+        assert_eq!(
+            jobs.iter()
+                .find(|j| j.id == original.id)
+                .unwrap()
+                .config
+                .workflow,
+            original.config.workflow
+        );
+        let mut config = config();
+        config.workflow["3"]["inputs"]["seed"] = json!(["4", 0]);
+        reopened.save_comfy_settings(&config)?;
+        assert!(reopened
+            .enqueue_image(ImageDraft {
+                prompt: "ny bild".into(),
+                randomize_seed: true,
+                ..Default::default()
+            })
+            .is_err());
+        assert_eq!(reopened.image_jobs()?.len(), 3);
         Ok(())
     }
     #[test]

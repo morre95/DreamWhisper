@@ -43,6 +43,36 @@ test('scene review preserves source order across edits and newest drafting batch
   assert.deepEqual(latestDrafts(values).map(d => d.id), ['new-first','old-first-edited','old-second']);
 });
 
+test('automatic journal seed is remembered and request retries preserve automatic mode', async () => {
+  const { saveAutomaticSeed } = await import(seedUrl);
+  const storage = new Map();
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
+    getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value),
+  } });
+  try {
+    saveAutomaticSeed(true);
+    const view = new JournalView({ querySelector: () => ({ value: 'flow' }) }, () => {}, () => {});
+    assert.equal(view.randomizeSeed, true);
+    view.entry = entry(); view.flush = async () => {}; view.refresh = async () => {};
+    view.images = { workflows: [{ id: 'flow', workflow: { '3': { inputs: { noise_seed: 123 } } } }] };
+    view.seed = '-1'; // Automatic mode ignores a previously entered fixed seed.
+    const calls = [];
+    handle = async (command, args) => { assert.equal(command, 'generate_journal_images'); calls.push(args); throw new Error('Network interrupted'); };
+    await assert.rejects(view.generate(['one', 'two']), /Network interrupted/);
+    await assert.rejects(view.generate(['one', 'two']), /Network interrupted/);
+    assert.equal(calls[0].randomizeSeed, true); assert.equal(calls[0].seed, null);
+    assert.equal(calls[0].requestId, calls[1].requestId);
+    view.randomizeSeed = false; view.seed = '';
+    await assert.rejects(view.generate(['one', 'two']), /Network interrupted/);
+    assert.notEqual(calls[2].requestId, calls[0].requestId); assert.equal(calls[2].randomizeSeed, false);
+    saveAutomaticSeed(false);
+    assert.equal(new JournalView({}, () => {}, () => {}).randomizeSeed, false);
+  } finally {
+    if (original) Object.defineProperty(globalThis, 'localStorage', original); else delete globalThis.localStorage;
+  }
+});
+
 test('removing a creative addition removes it from the generated prompt', () => {
   const value = scene(); assert.equal(composeScene(value), 'A forest. Soft light');
   value.additions = []; assert.equal(composeScene(value), 'A forest');

@@ -1,7 +1,7 @@
 import { invoke, convertFileSrc, isTauri } from '@tauri-apps/api/core';
 import { escapeHtml as esc, showWorkflowEditor } from './images';
 import type { ImageJob, SavedWorkflow } from './images';
-import { SeedControl, seedControlMarkup, seedError } from './image-seed';
+import { SeedControl, seedControlMarkup, seedError, loadAutomaticSeed, saveAutomaticSeed } from './image-seed';
 
 export interface JournalEntry {
   id: string; version: number; title: string; date: string; kind: 'dream' | 'meditation'; language: 'sv' | 'en';
@@ -58,6 +58,7 @@ export class JournalView {
   private draftRequest: { key: string; id: string } | null = null;
   private imageRequest: { key: string; id: string } | null = null;
   private seed = '';
+  private randomizeSeed = loadAutomaticSeed();
   private seedControl?: SeedControl;
   constructor(private container: HTMLElement, private notify: (message: string, error?: boolean) => void, private openRecording: (id: string, run: string | null) => void) {}
   get dirty() { return this.entryDirty || this.edits.size > 0; }
@@ -225,13 +226,14 @@ export class JournalView {
     await this.flush(); const e = this.entry!;
     const ids = keys.map(key => this.resolve(key));
     const workflowId = this.container.querySelector<HTMLSelectElement>('#journal-workflow')!.value;
-    const seed = this.seed.trim() || null;
+    const randomizeSeed = this.randomizeSeed;
+    const seed = randomizeSeed ? null : this.seed.trim() || null;
     const workflow = this.images?.workflows.find(w => w.id === workflowId);
-    const error = seedError(seed ?? '', workflow?.workflow);
+    const error = seedError(seed ?? '', workflow?.workflow, randomizeSeed);
     if (error) throw new Error(error);
-    const key = JSON.stringify([e.id, ids, workflowId, seed]);
+    const key = JSON.stringify([e.id, ids, workflowId, seed, randomizeSeed]);
     if (this.imageRequest?.key !== key) this.imageRequest = { key, id: crypto.randomUUID() };
-    await invoke('generate_journal_images', { requestId: this.imageRequest!.id, entryId: e.id, draftIds: ids, workflowId, seed });
+    await invoke('generate_journal_images', { requestId: this.imageRequest!.id, entryId: e.id, draftIds: ids, workflowId, seed, randomizeSeed });
     this.imageRequest = null;
     this.notify('Bildjobben har lagts i kön.'); await this.refresh();
   }
@@ -262,8 +264,8 @@ export class JournalView {
     target.querySelector<HTMLButtonElement>('#journal-add-workflow')!.onclick = () => {
       showWorkflowEditor(this.notify, async id => { this.workflowId = id; await this.refresh(); });
     };
-    this.seedControl = new SeedControl(target, 'journal-seed', value => {
-      this.seed = value; this.updateButtons();
+    this.seedControl = new SeedControl(target, 'journal-seed', (value, automatic) => {
+      this.seed = value; this.randomizeSeed = automatic; saveAutomaticSeed(automatic); this.updateButtons();
     });
     this.renderWorkflowChoice();
     target.querySelector<HTMLButtonElement>('#manual-scene')!.onclick = () => void this.action(async () => {
@@ -358,8 +360,8 @@ export class JournalView {
     const current = latestDrafts(this.snapshot?.drafts.filter(d => d.entry_id === this.entry?.id) ?? []).filter(d => d.description_revision === this.entry?.description_revision);
     const workflow = target.querySelector<HTMLSelectElement>('#journal-workflow');
     const selected = this.images?.workflows.find(w => w.id === workflow?.value);
-    this.seedControl?.update(selected?.workflow, this.seed);
-    const canGenerate = !!workflow?.value && !this.edits.size && !this.entryDirty && !seedError(this.seed, selected?.workflow);
+    this.seedControl?.update(selected?.workflow, this.seed, this.randomizeSeed);
+    const canGenerate = !!workflow?.value && !this.edits.size && !this.entryDirty && !seedError(this.seed, selected?.workflow, this.randomizeSeed);
     if (workflow) workflow.onchange = () => { this.workflowId = workflow.value; this.updateButtons(); };
     target.querySelectorAll<HTMLButtonElement>('[data-generate]').forEach(button => {
       const key = (button.closest('[data-scene]') as HTMLElement).dataset.scene;

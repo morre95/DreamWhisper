@@ -7,12 +7,12 @@ export interface ComfySettings {
   workflow_name: string; node_id: string; input_name: string; negative_field: PromptField | null;
   selected_workflow_id: string | null; comfy_directory: string; comfy_python_path: string;
 }
-export interface ImageDraft { prompt: string; negative_prompt: string | null; seed: string | null; source_text: string; recording_id: string | null; run_id: string | null }
+export interface ImageDraft { prompt: string; negative_prompt: string | null; seed: string | null; randomize_seed: boolean; source_text: string; recording_id: string | null; run_id: string | null }
 export interface GeneratedImage { deleted?: boolean; created_at?: string | null; path: string; node_id: string; filename: string; subfolder: string; image_type: string }
 export interface ImageJob { entry_id?: string | null; draft_revision_id?: string | null; id: string; created_at: string; draft: ImageDraft; config: ComfySettings; status: string; prompt_id: string | null; error: string | null; images: GeneratedImage[]; release_pending: boolean }
 export interface SavedWorkflow { id: string; name: string; workflow: ComfySettings['workflow']; node_id: string; input_name: string; negative_field: PromptField | null }
 interface ImageSnapshot { workflows: SavedWorkflow[]; settings: ComfySettings; draft: ImageDraft; jobs: ImageJob[] }
-export const emptyDraft = (): ImageDraft => ({ prompt: '', negative_prompt: null, seed: null, source_text: '', recording_id: null, run_id: null });
+export const emptyDraft = (): ImageDraft => ({ prompt: '', negative_prompt: null, seed: null, randomize_seed: false, source_text: '', recording_id: null, run_id: null });
 export const escapeHtml = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 export function workflowFields(workflow: unknown): { node: string; input: string; title: string }[] {
   if (!workflow || typeof workflow !== 'object' || Array.isArray(workflow)) throw new Error('Workflow måste vara ett JSON-objekt i API-format.');
@@ -111,8 +111,8 @@ export class ImagesView {
     this.container.querySelector<HTMLTextAreaElement>('#image-negative-prompt')!.oninput = event => {
       this.draft.negative_prompt = (event.target as HTMLTextAreaElement).value; this.change();
     };
-    this.seedControl = new SeedControl(this.container, 'image-seed', value => {
-      this.draft.seed = value || null; this.change(); this.updateSeed(); this.updateCreateButton();
+    this.seedControl = new SeedControl(this.container, 'image-seed', (value, automatic) => {
+      this.draft.seed = value || null; this.draft.randomize_seed = automatic; this.change(); this.updateSeed(); this.updateCreateButton();
     });
     this.container.querySelector<HTMLButtonElement>('#generate-image')!.onclick = () => void this.create();
     this.container.querySelector<HTMLButtonElement>('#clear-image-draft')!.onclick = () => {
@@ -138,12 +138,12 @@ export class ImagesView {
   }
   private updateSeed() {
     const workflow = this.snapshot?.workflows?.find(w => w.id === this.snapshot?.settings.selected_workflow_id);
-    this.seedControl?.update(workflow?.workflow, this.draft.seed ?? '');
+    this.seedControl?.update(workflow?.workflow, this.draft.seed ?? '', this.draft.randomize_seed);
   }
   private updateCreateButton() {
     const button = this.container.querySelector<HTMLButtonElement>('#generate-image');
     const workflow = this.snapshot?.workflows?.find(w => w.id === this.snapshot?.settings.selected_workflow_id);
-    if (button) button.disabled = this.creating || this.workflowChanging || !isTauri() || !this.draft.prompt.trim() || !workflow || !!seedError(this.draft.seed ?? '', workflow.workflow);
+    if (button) button.disabled = this.creating || this.workflowChanging || !isTauri() || !this.draft.prompt.trim() || !workflow || !!seedError(this.draft.seed ?? '', workflow.workflow, this.draft.randomize_seed);
   }
   private async create() {
     if (this.creating || this.workflowChanging) return;

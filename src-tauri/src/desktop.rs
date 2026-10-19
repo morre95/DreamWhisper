@@ -319,6 +319,7 @@ fn generate_journal_images(
     draft_ids: Vec<String>,
     workflow_id: String,
     seed: Option<String>,
+    randomize_seed: Option<bool>,
 ) -> ApiResult<Vec<String>> {
     state
         .db
@@ -328,6 +329,7 @@ fn generate_journal_images(
             draft_ids,
             &workflow_id,
             seed.as_deref(),
+            randomize_seed.unwrap_or(false),
         )
         .map_err(err)
 }

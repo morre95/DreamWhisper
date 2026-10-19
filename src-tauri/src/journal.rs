@@ -169,6 +169,8 @@ struct GenerationRecord {
     workflow_id: String,
     #[serde(default)]
     seed: Option<String>,
+    #[serde(default)]
+    randomize_seed: bool,
     job_ids: Vec<String>,
 }
 
@@ -681,8 +683,13 @@ impl Database {
         draft_ids: Vec<String>,
         workflow_id: &str,
         seed: Option<&str>,
+        randomize_seed: bool,
     ) -> Result<Vec<String>> {
-        let seed = seed.map(str::trim).filter(|s| !s.is_empty());
+        let seed = if randomize_seed {
+            None
+        } else {
+            seed.map(str::trim).filter(|s| !s.is_empty())
+        };
         ensure!(
             uuid::Uuid::parse_str(request_id).is_ok()
                 && !draft_ids.is_empty()
@@ -703,7 +710,8 @@ impl Database {
             ensure!(
                 saved.draft_ids == draft_ids
                     && saved.workflow_id == workflow_id
-                    && saved.seed.as_deref() == seed,
+                    && saved.seed.as_deref() == seed
+                    && saved.randomize_seed == randomize_seed,
                 "Begäran-ID används redan för en annan bildbegäran"
             );
             return Ok(saved.job_ids);
@@ -730,6 +738,7 @@ impl Database {
                     prompt: draft.prompt,
                     negative_prompt: draft.negative_prompt,
                     seed: seed.map(str::to_owned),
+                    randomize_seed,
                     source_text: revision.description,
                     recording_id: revision.recording_id,
                     run_id: revision.run_id,
@@ -753,6 +762,7 @@ impl Database {
                     draft_ids: request_drafts,
                     workflow_id: workflow_id.into(),
                     seed: seed.map(str::to_owned),
+                    randomize_seed,
                     job_ids: jobs.clone()
                 })?
             ],
@@ -1263,6 +1273,64 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn automatic_journal_seeds_are_independent_per_scene_and_stable_on_request_retry() -> Result<()>
+    {
+        let (temp, db, entry, flow) = fixture()?;
+        let mut workflow = db.saved_workflows()?.remove(0);
+        workflow.workflow["3"] = json!({"class_type":"KSampler","inputs":{"seed":123}});
+        db.save_workflow(workflow)?;
+        let one = scene(&db, &entry, "A forest")?;
+        let two = scene(&db, &entry, "A house")?;
+        db.approve_scene(&one.id)?;
+        db.approve_scene(&two.id)?;
+        let keys = vec![one.id, two.id];
+        let request = id();
+        let first = db.generate_journal_images(
+            &request,
+            &entry.id,
+            keys.clone(),
+            &flow,
+            Some("ignored"),
+            true,
+        )?;
+        let before = db.image_jobs()?;
+        let reopened = Database::open(temp.path())?;
+        assert_eq!(
+            reopened.generate_journal_images(
+                &request,
+                &entry.id,
+                keys.clone(),
+                &flow,
+                None,
+                true
+            )?,
+            first
+        );
+        assert_eq!(
+            serde_json::to_value(reopened.image_jobs()?)?,
+            serde_json::to_value(&before)?
+        );
+        assert!(reopened
+            .generate_journal_images(&request, &entry.id, keys.clone(), &flow, None, false)
+            .is_err());
+        reopened.generate_journal_images(&id(), &entry.id, keys, &flow, None, true)?;
+        let jobs = reopened.image_jobs()?;
+        let seeds: std::collections::HashSet<_> =
+            jobs.iter().map(|j| j.draft.seed.clone()).collect();
+        assert_eq!(seeds.len(), 4);
+        assert!(jobs.iter().all(|j| j.draft.randomize_seed
+            && j.config.workflow["3"]["inputs"]["seed"].as_u64()
+                == j.draft.seed.as_ref().and_then(|s| s.parse().ok())));
+        assert_eq!(
+            reopened.saved_workflows()?[0].workflow["3"]["inputs"]["seed"],
+            123
+        );
+        let legacy: GenerationRecord =
+            serde_json::from_value(json!({"draft_ids":[],"workflow_id":"flow","job_ids":[]}))?;
+        assert!(!legacy.randomize_seed);
+        Ok(())
+    }
+    #[test]
     fn journal_seed_is_saved_per_job_and_part_of_the_idempotent_request() -> Result<()> {
         let (temp, db, entry, flow) = fixture()?;
         let mut workflow = db.saved_workflows()?.remove(0);
@@ -1279,6 +1347,7 @@ mod tests {
             keys.clone(),
             &flow,
             Some("18446744073709551615"),
+            false,
         )?;
         assert_eq!(
             db.generate_journal_images(
@@ -1286,18 +1355,19 @@ mod tests {
                 &entry.id,
                 keys.clone(),
                 &flow,
-                Some("18446744073709551615")
+                Some("18446744073709551615"),
+                false
             )?,
             jobs
         );
         assert!(db
-            .generate_journal_images(&request, &entry.id, keys.clone(), &flow, Some("42"))
+            .generate_journal_images(&request, &entry.id, keys.clone(), &flow, Some("42"), false)
             .is_err());
         assert!(db
-            .generate_journal_images(&id(), &entry.id, keys.clone(), &flow, Some("-1"))
+            .generate_journal_images(&id(), &entry.id, keys.clone(), &flow, Some("-1"), false)
             .is_err());
         assert_eq!(db.image_jobs()?.len(), 1);
-        db.generate_journal_images(&id(), &entry.id, keys, &flow, Some("42"))?;
+        db.generate_journal_images(&id(), &entry.id, keys, &flow, Some("42"), false)?;
         let reopened = Database::open(temp.path())?;
         let saved = reopened.image_jobs()?;
         let original = saved.iter().find(|j| j.id == jobs[0]).unwrap();
@@ -1325,7 +1395,8 @@ mod tests {
                 &entry.id,
                 vec![one.id.clone(), two.id.clone()],
                 &workflow,
-                None
+                None,
+                false
             )
             .is_err());
         assert!(db.image_jobs()?.is_empty());
@@ -1333,9 +1404,9 @@ mod tests {
         let request = id();
         let keys = vec![one.id.clone(), two.id.clone()];
         let jobs =
-            db.generate_journal_images(&request, &entry.id, keys.clone(), &workflow, None)?;
+            db.generate_journal_images(&request, &entry.id, keys.clone(), &workflow, None, false)?;
         assert_eq!(
-            db.generate_journal_images(&request, &entry.id, keys, &workflow, None)?,
+            db.generate_journal_images(&request, &entry.id, keys, &workflow, None, false)?,
             jobs
         );
         assert_eq!(db.image_jobs()?.len(), 2);
@@ -1356,10 +1427,10 @@ mod tests {
         assert!(!revised.approved);
         assert!(db.approve_scene(&one.id).is_err());
         assert!(db
-            .generate_journal_images(&id(), &entry.id, vec![one.id], &workflow, None)
+            .generate_journal_images(&id(), &entry.id, vec![one.id], &workflow, None, false)
             .is_err());
         assert!(db
-            .generate_journal_images(&id(), &entry.id, vec![revised.id], &workflow, None)
+            .generate_journal_images(&id(), &entry.id, vec![revised.id], &workflow, None, false)
             .is_err());
         assert_eq!(
             db.image_jobs()?
@@ -1426,7 +1497,8 @@ mod tests {
         let entry = db.save_journal_entry(input(None, title))?;
         let draft = scene(db, &entry, title)?;
         db.approve_scene(&draft.id)?;
-        let ids = db.generate_journal_images(&id(), &entry.id, vec![draft.id], workflow, None)?;
+        let ids =
+            db.generate_journal_images(&id(), &entry.id, vec![draft.id], workflow, None, false)?;
         let mut job = db
             .image_jobs()?
             .into_iter()
