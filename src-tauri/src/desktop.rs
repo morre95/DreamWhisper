@@ -318,10 +318,17 @@ fn generate_journal_images(
     entry_id: String,
     draft_ids: Vec<String>,
     workflow_id: String,
+    seed: Option<String>,
 ) -> ApiResult<Vec<String>> {
     state
         .db
-        .generate_journal_images(&request_id, &entry_id, draft_ids, &workflow_id)
+        .generate_journal_images(
+            &request_id,
+            &entry_id,
+            draft_ids,
+            &workflow_id,
+            seed.as_deref(),
+        )
         .map_err(err)
 }
 #[tauri::command]

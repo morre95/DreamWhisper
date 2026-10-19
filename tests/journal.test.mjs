@@ -5,7 +5,11 @@ import ts from 'typescript';
 
 let handle;
 globalThis.__journalTestBridge = { invoke: (...args) => handle(...args), convertFileSrc: path => path, isTauri: () => true };
+const seedSource = readFileSync(new URL('../src/image-seed.ts', import.meta.url), 'utf8');
+const seedCode = ts.transpileModule(seedSource, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
+const seedUrl = `data:text/javascript;base64,${Buffer.from(seedCode).toString('base64')}`;
 const source = readFileSync(new URL('../src/journal.ts', import.meta.url), 'utf8')
+  .replace("from './image-seed';", `from '${seedUrl}';`)
   .replace(/import .* from '@tauri-apps\/api\/core';/, 'const { invoke, convertFileSrc, isTauri } = globalThis.__journalTestBridge;')
   .replace(/import .* from '\.\/images';/, 'const esc = value => String(value); const showWorkflowEditor = () => {};');
 const code = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
@@ -14,6 +18,25 @@ const { JournalView, composeScene, latestDrafts } = await import(`data:text/java
 const entry = () => ({ id: 'entry', version: 1, title: 'Dream', date: '2026-10-06', kind: 'dream', language: 'sv', description: 'Original', reflections: 'Private', description_revision: 'revision', confirmed_revision: 'revision', recording_id: null, run_id: null, favourite_image: null });
 const scene = () => ({ title: 'Forest', summary: 'Scene', details: [{ text: 'Forest', quote: 'forest', english: 'A forest' }], additions: [{ text: 'Light', quote: null, english: 'Soft light' }], questions: [] });
 const draft = (id, parent = null) => ({ id, parent_id: parent, entry_id: 'entry', description_revision: 'revision', scene: scene(), prompt: 'A forest. Soft light', negative_prompt: null, arrangement: '', manual: false, approved: false });
+
+test('journal generation keeps the chosen seed and reuses a request only for the same seed', async () => {
+  const view = new JournalView({ querySelector: () => ({ value: 'flow' }) }, () => {}, () => {});
+  view.entry = entry(); view.flush = async () => {}; view.refresh = async () => {};
+  view.images = { workflows: [{ id: 'flow', workflow: { '3': { inputs: { noise_seed: 123 } } } }] };
+  const calls = [];
+  handle = async (command, args) => { assert.equal(command, 'generate_journal_images'); calls.push(args); throw new Error('Network interrupted'); };
+  view.seed = '18446744073709551615';
+  await assert.rejects(view.generate(['scene']), /Network interrupted/);
+  await assert.rejects(view.generate(['scene']), /Network interrupted/);
+  assert.equal(calls[0].seed, '18446744073709551615');
+  assert.equal(calls[1].requestId, calls[0].requestId);
+  view.seed = '42';
+  await assert.rejects(view.generate(['scene']), /Network interrupted/);
+  assert.notEqual(calls[2].requestId, calls[0].requestId);
+  assert.equal(calls[2].seed, '42');
+  view.seed = '-1'; await assert.rejects(view.generate(['scene']), /heltal/);
+  assert.equal(calls.length, 3);
+});
 
 test('scene review preserves source order across edits and newest drafting batches', () => {
   const values = [{ ...draft('old-second'), position: 1, batch_created_at: '2026-10-06T10:00:00Z' }, { ...draft('old-first-edited','old-first'), position: 0, batch_created_at: '2026-10-06T10:00:00Z' }, { ...draft('old-first'), position: 0, batch_created_at: '2026-10-06T10:00:00Z' }, { ...draft('new-first'), position: 0, batch_created_at: '2026-10-06T11:00:00Z' }];

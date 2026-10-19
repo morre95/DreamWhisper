@@ -1,4 +1,5 @@
 import { invoke, convertFileSrc, isTauri } from '@tauri-apps/api/core';
+import { SeedControl, seedControlMarkup, seedError } from './image-seed';
 
 export interface PromptField { node_id: string; input_name: string }
 export interface ComfySettings {
@@ -6,12 +7,12 @@ export interface ComfySettings {
   workflow_name: string; node_id: string; input_name: string; negative_field: PromptField | null;
   selected_workflow_id: string | null; comfy_directory: string; comfy_python_path: string;
 }
-export interface ImageDraft { prompt: string; negative_prompt: string | null; source_text: string; recording_id: string | null; run_id: string | null }
+export interface ImageDraft { prompt: string; negative_prompt: string | null; seed: string | null; source_text: string; recording_id: string | null; run_id: string | null }
 export interface GeneratedImage { deleted?: boolean; created_at?: string | null; path: string; node_id: string; filename: string; subfolder: string; image_type: string }
 export interface ImageJob { entry_id?: string | null; draft_revision_id?: string | null; id: string; created_at: string; draft: ImageDraft; config: ComfySettings; status: string; prompt_id: string | null; error: string | null; images: GeneratedImage[]; release_pending: boolean }
 export interface SavedWorkflow { id: string; name: string; workflow: ComfySettings['workflow']; node_id: string; input_name: string; negative_field: PromptField | null }
 interface ImageSnapshot { workflows: SavedWorkflow[]; settings: ComfySettings; draft: ImageDraft; jobs: ImageJob[] }
-export const emptyDraft = (): ImageDraft => ({ prompt: '', negative_prompt: null, source_text: '', recording_id: null, run_id: null });
+export const emptyDraft = (): ImageDraft => ({ prompt: '', negative_prompt: null, seed: null, source_text: '', recording_id: null, run_id: null });
 export const escapeHtml = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 export function workflowFields(workflow: unknown): { node: string; input: string; title: string }[] {
   if (!workflow || typeof workflow !== 'object' || Array.isArray(workflow)) throw new Error('Workflow måste vara ett JSON-objekt i API-format.');
@@ -45,6 +46,7 @@ export class ImagesView {
   private visible = false;
   private galleryVisible = false;
   private creating = false;
+  private seedControl?: SeedControl;
   private readonly esc = escapeHtml;
   constructor(private readonly container: HTMLElement, private readonly configContainer: () => HTMLElement | null, private readonly notify: (text: string, error?: boolean) => void, private readonly openRecording: (id: string, runId: string | null) => void, private readonly galleryContainer?: HTMLElement) {}
   async refresh() {
@@ -57,6 +59,7 @@ export class ImagesView {
       if (!this.container.querySelector('#image-prompt')) this.render();
       this.renderWorkflows();
       this.updateNegativePrompt();
+      this.updateSeed();
       this.renderJobs();
       this.updateCreateButton();
     }
@@ -71,7 +74,7 @@ export class ImagesView {
   async fromSelection(text: string, recordingId: string, runId: string | null): Promise<boolean> {
     if (!this.snapshot) await this.refresh();
     if ((this.draft.prompt.trim() || this.draft.negative_prompt?.trim()) && !window.confirm('Ersätta det befintliga bildutkastet med den markerade texten?')) return false;
-    this.draft = { prompt: text, negative_prompt: null, source_text: text, recording_id: recordingId, run_id: runId };
+    this.draft = { ...emptyDraft(), prompt: text, source_text: text, recording_id: recordingId, run_id: runId };
     this.draftVersion++;
     await this.persist();
     return true;
@@ -98,6 +101,7 @@ export class ImagesView {
       <section id="workflow-library" class="settings-card workflow-library"></section>
       <div class="settings-card image-editor"><label for="image-prompt">Positiv prompt</label><textarea id="image-prompt" rows="7" placeholder="Beskriv bilden du vill skapa…">${esc(this.draft.prompt)}</textarea>
       <label for="image-negative-prompt" class="negative-prompt-label">Negativ prompt</label><textarea id="image-negative-prompt" rows="3" placeholder="Beskriv det du vill undvika i bilden…"></textarea><small id="negative-prompt-hint" class="muted"></small>
+      ${seedControlMarkup('image-seed')}
       <p id="image-source" class="muted">${this.draft.recording_id ? 'Utkast från ett transkript. Ändringar här påverkar inte transkriptet.' : 'Fristående bildprompt.'}</p>
       <div class="device-actions"><button id="generate-image" class="primary">Skapa bild</button><button id="clear-image-draft" class="secondary">Nytt utkast</button></div>
       <p class="muted">Whisper lämnar plats åt bildskapandet på GPU:n. ComfyUI kan startas under Inställningar.</p></div>
@@ -107,6 +111,9 @@ export class ImagesView {
     this.container.querySelector<HTMLTextAreaElement>('#image-negative-prompt')!.oninput = event => {
       this.draft.negative_prompt = (event.target as HTMLTextAreaElement).value; this.change();
     };
+    this.seedControl = new SeedControl(this.container, 'image-seed', value => {
+      this.draft.seed = value || null; this.change(); this.updateSeed(); this.updateCreateButton();
+    });
     this.container.querySelector<HTMLButtonElement>('#generate-image')!.onclick = () => void this.create();
     this.container.querySelector<HTMLButtonElement>('#clear-image-draft')!.onclick = () => {
       if ((this.draft.prompt.trim() || this.draft.negative_prompt?.trim()) && !window.confirm('Rensa bildutkastet? Sparade bilder finns kvar.')) return;
@@ -114,6 +121,7 @@ export class ImagesView {
     };
     this.renderWorkflows();
     this.updateNegativePrompt();
+    this.updateSeed();
     this.updateCreateButton();
     this.renderJobs();
   }
@@ -128,9 +136,14 @@ export class ImagesView {
     if (input.value !== value) input.value = value;
     this.container.querySelector<HTMLElement>('#negative-prompt-hint')!.textContent = mapping ? 'Förifyllt från flödet tills du ändrar det. Töm fältet om du vill använda en tom negativ prompt.' : 'Välj ett negativt promptfält via Ändra namn / promptfält för detta flöde.';
   }
+  private updateSeed() {
+    const workflow = this.snapshot?.workflows?.find(w => w.id === this.snapshot?.settings.selected_workflow_id);
+    this.seedControl?.update(workflow?.workflow, this.draft.seed ?? '');
+  }
   private updateCreateButton() {
     const button = this.container.querySelector<HTMLButtonElement>('#generate-image');
-    if (button) button.disabled = this.creating || this.workflowChanging || !isTauri() || !this.draft.prompt.trim() || !this.snapshot?.workflows?.some(w => w.id === this.snapshot?.settings.selected_workflow_id);
+    const workflow = this.snapshot?.workflows?.find(w => w.id === this.snapshot?.settings.selected_workflow_id);
+    if (button) button.disabled = this.creating || this.workflowChanging || !isTauri() || !this.draft.prompt.trim() || !workflow || !!seedError(this.draft.seed ?? '', workflow.workflow);
   }
   private async create() {
     if (this.creating || this.workflowChanging) return;
@@ -152,7 +165,7 @@ export class ImagesView {
     const html = jobs.length ? jobs.map(job => `<article class="settings-card image-job"><div class="image-job-head"><h2>${esc(new Date(job.created_at).toLocaleString('sv-SE'))}</h2><span class="status ${job.status === 'completed' ? 'completed' : job.status === 'failed' || job.status === 'uncertain' ? 'failed' : 'queued'}">${esc(statuses[job.status] ?? job.status)}</span></div>
       ${job.release_pending && ['completed', 'failed', 'uncertain'].includes(job.status) ? '<p class="muted">Väntar på ledig ComfyUI-kö och frigör GPU-minnet innan Whisper återstartas.</p>' : ''}
       ${job.error ? `<p class="inline-error">${esc(job.error)}</p>` : ''}
-      <details><summary>Bildprompt och workflow</summary><p class="image-prompt-preview">${esc(job.draft.prompt)}</p>${job.draft.negative_prompt != null ? `<b>Negativ prompt</b><p class="image-prompt-preview">${esc(job.draft.negative_prompt) || '(tom)'}</p>` : ''}<small>${esc(job.config.workflow_name)}</small></details>
+      <details><summary>Bildprompt och workflow</summary><p class="image-prompt-preview">${esc(job.draft.prompt)}</p>${job.draft.negative_prompt != null ? `<b>Negativ prompt</b><p class="image-prompt-preview">${esc(job.draft.negative_prompt) || '(tom)'}</p>` : ''}${job.draft.seed != null ? `<p>Seed: ${esc(job.draft.seed)}</p>` : ''}<small>${esc(job.config.workflow_name)}</small></details>
       ${job.images.some(image => !image.deleted) ? `<div class="image-gallery">${job.images.filter(image => !image.deleted).map(image => this.thumbnail(image, job)).join('')}</div>` : ''}
       <div class="device-actions"><button class="secondary small" data-reuse-image="${esc(job.id)}">Använd prompt igen</button>${job.draft.recording_id ? `<button class="secondary small" data-image-source="${esc(job.id)}">Öppna inspelningen</button>` : ''}${job.prompt_id && ['failed', 'uncertain'].includes(job.status) && !job.release_pending ? `<button class="secondary small" data-follow-image="${esc(job.id)}">Följ upp / hämta igen</button>` : ''}${job.release_pending && job.error ? `<button class="secondary small" data-dismiss-image="${esc(job.id)}">Avsluta uppföljning</button>` : ''}</div>
       </article>`).join('') : '<div class="settings-card"><p class="muted">Här visas bildjobben och dina sparade bilder.</p></div>';
@@ -195,7 +208,7 @@ export class ImagesView {
     const html = entries.length ? `<div class="image-gallery">${entries.map(({ job, image }, index) => `<article class="settings-card gallery-card">
       ${this.thumbnail(image, job)}
       <p><b>${esc(job.config.workflow_name)}</b><br><small>${esc(new Date(image.created_at ?? job.created_at).toLocaleString('sv-SE'))}</small></p>
-      <details><summary>Bildprompt</summary><p class="image-prompt-preview">${esc(job.draft.prompt)}</p>${job.draft.negative_prompt != null ? `<b>Negativ prompt</b><p class="image-prompt-preview">${esc(job.draft.negative_prompt)}</p>` : ''}</details>
+      <details><summary>Bildprompt</summary><p class="image-prompt-preview">${esc(job.draft.prompt)}</p>${job.draft.negative_prompt != null ? `<b>Negativ prompt</b><p class="image-prompt-preview">${esc(job.draft.negative_prompt)}</p>` : ''}${job.draft.seed != null ? `<p>Seed: ${esc(job.draft.seed)}</p>` : ''}</details>
       <button class="secondary small" data-delete="${index}">Ta bort bild</button></article>`).join('')}</div>` : '<p class="muted">Inga sparade bilder ännu.</p>';
     if (target.dataset.rendered === html) return;
     target.dataset.rendered = html; target.innerHTML = html;

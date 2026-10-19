@@ -1,6 +1,7 @@
 import { invoke, convertFileSrc, isTauri } from '@tauri-apps/api/core';
 import { escapeHtml as esc, showWorkflowEditor } from './images';
 import type { ImageJob, SavedWorkflow } from './images';
+import { SeedControl, seedControlMarkup, seedError } from './image-seed';
 
 export interface JournalEntry {
   id: string; version: number; title: string; date: string; kind: 'dream' | 'meditation'; language: 'sv' | 'en';
@@ -56,6 +57,8 @@ export class JournalView {
   private working = false;
   private draftRequest: { key: string; id: string } | null = null;
   private imageRequest: { key: string; id: string } | null = null;
+  private seed = '';
+  private seedControl?: SeedControl;
   constructor(private container: HTMLElement, private notify: (message: string, error?: boolean) => void, private openRecording: (id: string, run: string | null) => void) {}
   get dirty() { return this.entryDirty || this.edits.size > 0; }
   private resolve(key: string): string { return this.aliases.has(key) ? this.resolve(this.aliases.get(key)!) : key; }
@@ -222,9 +225,13 @@ export class JournalView {
     await this.flush(); const e = this.entry!;
     const ids = keys.map(key => this.resolve(key));
     const workflowId = this.container.querySelector<HTMLSelectElement>('#journal-workflow')!.value;
-    const key = JSON.stringify([e.id, ids, workflowId]);
+    const seed = this.seed.trim() || null;
+    const workflow = this.images?.workflows.find(w => w.id === workflowId);
+    const error = seedError(seed ?? '', workflow?.workflow);
+    if (error) throw new Error(error);
+    const key = JSON.stringify([e.id, ids, workflowId, seed]);
     if (this.imageRequest?.key !== key) this.imageRequest = { key, id: crypto.randomUUID() };
-    await invoke('generate_journal_images', { requestId: this.imageRequest!.id, entryId: e.id, draftIds: ids, workflowId });
+    await invoke('generate_journal_images', { requestId: this.imageRequest!.id, entryId: e.id, draftIds: ids, workflowId, seed });
     this.imageRequest = null;
     this.notify('Bildjobben har lagts i kön.'); await this.refresh();
   }
@@ -245,6 +252,7 @@ export class JournalView {
       <label>Bildflöde<select id="journal-workflow"></select></label>
       <div class="device-actions"><button id="journal-add-workflow" class="secondary">Lägg till flöde</button></div>
       <p id="journal-workflow-hint" class="muted"></p>
+      ${seedControlMarkup('journal-seed')}
       <div class="device-actions"><button id="combine-scenes" class="secondary">Kombinera valda scener</button><button id="generate-all-scenes" class="primary">Generera alla scener separat</button></div>
       <div id="scene-cards">${current.map(d => this.card(d)).join('') || '<p class="muted">Skapa scenutkast eller skriv en egen prompt nedan.</p>'}</div>
       <details><summary>Skriv en egen scenprompt</summary><label>Engelsk bildprompt<textarea id="manual-prompt" rows="4"></textarea></label><button id="manual-scene" class="secondary">Spara scen för granskning</button></details>
@@ -254,6 +262,9 @@ export class JournalView {
     target.querySelector<HTMLButtonElement>('#journal-add-workflow')!.onclick = () => {
       showWorkflowEditor(this.notify, async id => { this.workflowId = id; await this.refresh(); });
     };
+    this.seedControl = new SeedControl(target, 'journal-seed', value => {
+      this.seed = value; this.updateButtons();
+    });
     this.renderWorkflowChoice();
     target.querySelector<HTMLButtonElement>('#manual-scene')!.onclick = () => void this.action(async () => {
       const prompt = target.querySelector<HTMLTextAreaElement>('#manual-prompt')!.value;
@@ -346,7 +357,9 @@ export class JournalView {
     const target = this.container.querySelector('#journal-results'); if (!target) return;
     const current = latestDrafts(this.snapshot?.drafts.filter(d => d.entry_id === this.entry?.id) ?? []).filter(d => d.description_revision === this.entry?.description_revision);
     const workflow = target.querySelector<HTMLSelectElement>('#journal-workflow');
-    const canGenerate = !!workflow?.value && !this.edits.size && !this.entryDirty;
+    const selected = this.images?.workflows.find(w => w.id === workflow?.value);
+    this.seedControl?.update(selected?.workflow, this.seed);
+    const canGenerate = !!workflow?.value && !this.edits.size && !this.entryDirty && !seedError(this.seed, selected?.workflow);
     if (workflow) workflow.onchange = () => { this.workflowId = workflow.value; this.updateButtons(); };
     target.querySelectorAll<HTMLButtonElement>('[data-generate]').forEach(button => {
       const key = (button.closest('[data-scene]') as HTMLElement).dataset.scene;

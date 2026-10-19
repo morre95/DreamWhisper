@@ -88,6 +88,9 @@ pub struct ImageDraft {
     pub prompt: String,
     #[serde(default)]
     pub negative_prompt: Option<String>,
+    // Keep the full u64 range exact across the JavaScript/JSON boundary.
+    #[serde(default)]
+    pub seed: Option<String>,
     pub source_text: String,
     pub recording_id: Option<String>,
     pub run_id: Option<String>,
@@ -381,6 +384,7 @@ impl Database {
         }
         config.workflow =
             build_prompt_with_negative(&config, &draft.prompt, draft.negative_prompt.as_deref())?;
+        draft.seed = apply_seed(&mut config.workflow, draft.seed.as_deref())?;
         draft.negative_prompt = config.negative_field.as_ref().and_then(|field| {
             config
                 .workflow
@@ -503,6 +507,37 @@ pub fn validate_workflow(workflow: &Value) -> Result<()> {
     }
     Ok(())
 }
+pub(crate) fn apply_seed(workflow: &mut Value, seed: Option<&str>) -> Result<Option<String>> {
+    let Some(seed) = seed.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        seed.len() <= 20 && seed.bytes().all(|b| b.is_ascii_digit()),
+        "Ange seed som ett heltal mellan 0 och 18446744073709551615."
+    );
+    let value: u64 = seed
+        .parse()
+        .context("Ange seed som ett heltal mellan 0 och 18446744073709551615.")?;
+    let mut changed = false;
+    if let Some(nodes) = workflow.as_object_mut() {
+        for node in nodes.values_mut() {
+            if let Some(inputs) = node.get_mut("inputs").and_then(Value::as_object_mut) {
+                for name in ["seed", "noise_seed"] {
+                    if let Some(field) = inputs.get_mut(name).filter(|v| v.as_u64().is_some()) {
+                        *field = json!(value);
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    anyhow::ensure!(
+        changed,
+        "Flödet saknar ett direkt numeriskt seed- eller noise_seed-fält. Använd flödets seed eller ändra nodkopplingarna i ComfyUI."
+    );
+    Ok(Some(value.to_string()))
+}
+
 pub fn build_prompt(config: &ComfySettings, text: &str) -> Result<Value> {
     build_prompt_with_negative(config, text, None)
 }
@@ -1389,6 +1424,7 @@ for line in sys.stdin:
             json!({"prompt":"positiv","source_text":"","recording_id":null,"run_id":null}),
         )?;
         assert!(draft.negative_prompt.is_none());
+        assert!(draft.seed.is_none());
         Ok(())
     }
     #[test]
@@ -1420,6 +1456,87 @@ for line in sys.stdin:
             Some("legacy")
         );
         assert_eq!(db.saved_workflows()?[0].workflow, config.workflow);
+        Ok(())
+    }
+    #[test]
+    fn seed_override_is_exact_durable_and_does_not_change_the_saved_workflow() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let db = Database::open(temp.path())?;
+        let original = config();
+        let flow = db.save_workflow(SavedWorkflow {
+            id: String::new(),
+            name: "Seedtest".into(),
+            workflow: original.workflow.clone(),
+            node_id: original.node_id.clone(),
+            input_name: original.input_name.clone(),
+            negative_field: None,
+        })?;
+        db.select_workflow(&flow)?;
+        let draft = ImageDraft {
+            prompt: "samma prompt".into(),
+            seed: Some(u64::MAX.to_string()),
+            ..Default::default()
+        };
+        db.save_image_draft(&draft)?;
+        let first = db.enqueue_image(draft.clone())?;
+        let second = db.enqueue_image(ImageDraft {
+            seed: Some("0".into()),
+            ..draft.clone()
+        })?;
+        let default = db.enqueue_image(ImageDraft {
+            seed: None,
+            ..draft
+        })?;
+        let reopened = Database::open(temp.path())?;
+        let jobs = reopened.image_jobs()?;
+        let job = |id: &str| jobs.iter().find(|j| j.id == id).unwrap();
+        assert_eq!(
+            job(&first).config.workflow["3"]["inputs"]["seed"].as_u64(),
+            Some(u64::MAX)
+        );
+        assert_eq!(
+            job(&first).draft.seed.as_deref(),
+            Some("18446744073709551615")
+        );
+        assert_eq!(job(&second).config.workflow["3"]["inputs"]["seed"], 0);
+        assert_eq!(job(&default).config.workflow["3"]["inputs"]["seed"], 123);
+        assert_eq!(
+            reopened.image_draft()?.seed.as_deref(),
+            Some("18446744073709551615")
+        );
+        assert_eq!(reopened.saved_workflows()?[0].workflow, original.workflow);
+        assert_eq!(job(&first).config.workflow["3"]["inputs"]["steps"], 20);
+        assert_eq!(job(&first).draft.prompt, job(&second).draft.prompt);
+        Ok(())
+    }
+    #[test]
+    fn seed_override_handles_noise_seeds_without_replacing_links_or_other_inputs() -> Result<()> {
+        let mut workflow = config().workflow;
+        workflow["8"] =
+            json!({"class_type":"KSamplerAdvanced","inputs":{"noise_seed":456,"steps":30}});
+        workflow["9"] = json!({"class_type":"RandomNoise","inputs":{"noise_seed":789}});
+        workflow["10"] = json!({"class_type":"KSampler","inputs":{"seed":["11",0]}});
+        let original = workflow.clone();
+        assert_eq!(
+            apply_seed(&mut workflow, Some(" 00042 "))?.as_deref(),
+            Some("42")
+        );
+        assert_eq!(workflow["3"]["inputs"]["seed"], 42);
+        assert_eq!(workflow["8"]["inputs"]["noise_seed"], 42);
+        assert_eq!(workflow["9"]["inputs"]["noise_seed"], 42);
+        assert_eq!(workflow["10"], original["10"]);
+        assert_eq!(workflow["8"]["inputs"]["steps"], 30);
+        assert_eq!(workflow["6"], original["6"]);
+        for seed in ["-1", "+1", "1.5", "1e3", "abc", "18446744073709551616"] {
+            let mut copy = original.clone();
+            assert!(apply_seed(&mut copy, Some(seed)).is_err());
+            assert_eq!(copy, original);
+        }
+        let mut no_seed = json!({"1":{"inputs":{"seed":["2",0]}},"2":{"inputs":{"value":1}}});
+        assert!(apply_seed(&mut no_seed, Some("42")).is_err());
+        let mut copy = original.clone();
+        assert_eq!(apply_seed(&mut copy, Some("  "))?, None);
+        assert_eq!(copy, original);
         Ok(())
     }
     #[test]
